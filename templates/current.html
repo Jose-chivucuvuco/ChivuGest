@@ -1,0 +1,1 @@
+{% extends "base.html" %}{% block content %}<h1>Conta Corrente</h1><div class="panel"><table><tr><th>Data</th><th>Documento</th><th>Descrição</th><th>Débito</th><th>Crédito</th><th>Saldo</th></tr>{% for r,b in rows %}<tr><td>{{r[0]}}</td><td>{{r[1]}}</td><td>{{r[2]}}</td><td>Kz {{r[3]}}</td><td>Kz {{r[4]}}</td><td><b>Kz {{b}}</b></td></tr>{% endfor %}</table></div>{% endblock %}

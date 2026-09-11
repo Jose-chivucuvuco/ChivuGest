@@ -1,0 +1,9 @@
+Flask>=3.1,<4
+Flask-SQLAlchemy>=3.1,<4
+psycopg[binary]>=3.2,<4
+Werkzeug>=3.1,<4
+openpyxl>=3.1,<4
+PyMuPDF>=1.24,<2
+pytesseract>=0.3.13,<1
+Pillow>=10,<13
+gunicorn>=23,<24
