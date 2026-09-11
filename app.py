@@ -125,7 +125,20 @@ def dashboard():
     received=db.session.query(func.coalesce(func.sum(Payment.amount),0)).scalar() or 0
     receivable=float(billed)-float(received)
     late=db.session.query(func.coalesce(func.sum(Invoice.amount-Invoice.paid),0)).filter(Invoice.due_date<date.today(),Invoice.amount>Invoice.paid).scalar() or 0
-    months=db.session.query(func.strftime("%Y-%m",Payment.date).label("m"),func.sum(Payment.amount).label("v")).group_by("m").order_by("m").all()
+    # Agrupamento mensal compatível com PostgreSQL e SQLite
+    monthly_raw = db.session.query(
+        func.extract("year", Payment.date).label("y"),
+        func.extract("month", Payment.date).label("m"),
+        func.sum(Payment.amount).label("v")
+    ).group_by("y", "m").order_by("y", "m").all()
+    months=[]
+    for row in monthly_raw:
+        label=f"{int(row.y):04d}-{int(row.m):02d}"
+        months.append({"m": label, "v": float(row.v or 0)})
+    received_float=float(received or 0)
+    max_month=max([x["v"] for x in months], default=0)
+    for item in months:
+        item["height"] = 20 + (item["v"] / (max_month or 1)) * 170
     recent=Payment.query.order_by(Payment.id.desc()).limit(10).all()
     return render_template("dashboard.html",billed=billed,received=received,receivable=receivable,late=late,months=months,recent=recent,clients=Client.query.count())
 
