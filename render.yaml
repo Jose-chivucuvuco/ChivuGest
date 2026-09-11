@@ -3,7 +3,7 @@ services:
     name: chivugest
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --bind 0.0.0.0:$PORT app:app
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 180 --max-requests 20 --max-requests-jitter 5 app:app
     envVars:
       - key: DATABASE_URL
         fromDatabase:

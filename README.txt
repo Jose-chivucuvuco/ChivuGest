@@ -34,3 +34,6 @@ A versão usa PostgreSQL quando DATABASE_URL está definida. db.create_all() cri
 
 OCR NO RENDER
 O Dockerfile instala tesseract-ocr, tesseract-ocr-por e tesseract-ocr-eng.
+
+
+CORREÇÃO OOM/OCR: processamento OCR limitado a imagens de 2600 px, PDF até 20 páginas, 1.5 DPI, escala de cinza e recolha de memória; upload máximo 20 MB.
