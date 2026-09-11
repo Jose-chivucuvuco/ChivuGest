@@ -909,6 +909,58 @@ def users():
         except IntegrityError: db.session.rollback(); flash("Nome de utilizador já existe.")
     return render_template("users.html", rows=User.query.order_by(User.name).all())
 
+@app.route("/change-password", methods=["GET", "POST"])
+@login_required
+def change_password():
+    user = db.session.get(User, session["uid"])
+    if not user:
+        session.clear()
+        return redirect(url_for("login"))
+    if request.method == "POST":
+        current = request.form.get("current_password", "")
+        new_password = request.form.get("new_password", "")
+        confirm = request.form.get("confirm_password", "")
+        if not check_password_hash(user.password_hash, current):
+            flash("A palavra-passe atual está incorreta.")
+        elif len(new_password) < 8:
+            flash("A nova palavra-passe deve ter pelo menos 8 caracteres.")
+        elif not re.search(r"[A-Z]", new_password) or not re.search(r"[a-z]", new_password) or not re.search(r"\d", new_password):
+            flash("A nova palavra-passe deve conter pelo menos uma letra maiúscula, uma minúscula e um número.")
+        elif new_password != confirm:
+            flash("A confirmação da nova palavra-passe não coincide.")
+        elif new_password == current:
+            flash("A nova palavra-passe deve ser diferente da atual.")
+        else:
+            user.password_hash = generate_password_hash(new_password)
+            db.session.commit()
+            flash("Palavra-passe alterada com sucesso.")
+            return redirect(url_for("dashboard"))
+    return render_template("change_password.html")
+
+@app.route("/users/reset-password/<int:uid>", methods=["GET", "POST"])
+@login_required
+@admin_required
+def reset_password(uid):
+    user = db.session.get(User, uid)
+    if not user:
+        flash("Utilizador não encontrado.")
+        return redirect(url_for("users"))
+    if request.method == "POST":
+        new_password = request.form.get("new_password", "")
+        confirm = request.form.get("confirm_password", "")
+        if len(new_password) < 8:
+            flash("A nova palavra-passe deve ter pelo menos 8 caracteres.")
+        elif not re.search(r"[A-Z]", new_password) or not re.search(r"[a-z]", new_password) or not re.search(r"\d", new_password):
+            flash("A nova palavra-passe deve conter pelo menos uma letra maiúscula, uma minúscula e um número.")
+        elif new_password != confirm:
+            flash("A confirmação da nova palavra-passe não coincide.")
+        else:
+            user.password_hash = generate_password_hash(new_password)
+            db.session.commit()
+            flash(f"Palavra-passe de {user.username} redefinida com sucesso.")
+            return redirect(url_for("users"))
+    return render_template("reset_password.html", user=user)
+
 @app.route("/users/toggle/<int:uid>")
 @login_required
 @admin_required
