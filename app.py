@@ -24,7 +24,7 @@ from PIL import Image
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
-app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024
 
 database_url = os.environ.get("DATABASE_URL", "sqlite:///chivugest.db")
 if database_url.startswith("postgres://"):
@@ -423,17 +423,21 @@ def extract_pdf_or_image(file_storage):
             txt = page.get_text("text") or ""
             if len(re.sub(r"\s+", "", txt)) < 40:
                 if pytesseract is None: raise ValueError("OCR não instalado.")
-                pix = page.get_pixmap(matrix=fitz.Matrix(2.4, 2.4), alpha=False)
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                try: txt = pytesseract.image_to_string(img, lang="por+eng")
-                except Exception: txt = pytesseract.image_to_string(img, lang="eng")
+                pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+                img = Image.frombytes("L", [pix.width, pix.height], pix.samples)
+                try: txt = pytesseract.image_to_string(img, lang="por+eng", config="--psm 6")
+                except Exception: txt = pytesseract.image_to_string(img, lang="eng", config="--psm 6")
+                img.close()
+                del img, pix
             texts.append(txt)
         doc.close()
     elif filename.endswith((".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff")):
         if pytesseract is None: raise ValueError("OCR não instalado.")
-        img = Image.open(io.BytesIO(raw)).convert("RGB")
-        try: texts.append(pytesseract.image_to_string(img, lang="por+eng"))
-        except Exception: texts.append(pytesseract.image_to_string(img, lang="eng"))
+        img = Image.open(io.BytesIO(raw)).convert("L")
+        img.thumbnail((1800, 1800), Image.Resampling.LANCZOS)
+        try: texts.append(pytesseract.image_to_string(img, lang="por+eng", config="--psm 6"))
+        except Exception: texts.append(pytesseract.image_to_string(img, lang="eng", config="--psm 6"))
+        img.close()
     else:
         raise ValueError("Formato não suportado para OCR. Use PDF, PNG, JPG, JPEG, WEBP, TIF ou TIFF.")
     parsed = parse_invoice_text("\n".join(texts))
@@ -776,6 +780,7 @@ def alerts():
 
 @app.route("/alerts/resolve/<int:aid>")
 @login_required
+@admin_required
 def resolve_alert(aid):
     a=db.session.get(ComplianceAlert, aid)
     if a: a.resolved=True; db.session.commit()
@@ -880,6 +885,107 @@ def settings():
 @login_required
 def legal_library():
     return render_template("legal.html", documents=LegalDocument.query.order_by(LegalDocument.id).all(), rules=LegalRule.query.filter_by(active=True).order_by(LegalRule.id).all())
+
+# -----------------------------------------------------------------------------
+# Administrator-only data maintenance (edit/delete across the application)
+# -----------------------------------------------------------------------------
+ADMIN_MODELS = {
+    "supplier": Supplier, "supplier_invoice": SupplierInvoice, "supplier_payment": SupplierPayment,
+    "contract": Contract, "procedure": ProcurementProcedure, "client": Client, "invoice": Invoice,
+    "payment": Payment, "user": User, "legal_rule": LegalRule, "legal_document": LegalDocument,
+    "alert": ComplianceAlert,
+}
+# Fields that are generated/system-only or intentionally removed from the supplier UI.
+ADMIN_EXCLUDED = {"id", "created_at", "password_hash", "source_hash", "raw_text", "extracted_data", "import_confidence"}
+ADMIN_MODEL_EXCLUDED = {"Supplier": {"portal_status", "certification_status", "tax_clearance_expiry", "social_security_expiry", "professional_license_expiry", "blocked"}}
+
+
+def admin_field_specs(model):
+    specs=[]
+    mapper=inspect(model)
+    for col in mapper.columns:
+        if col.name in ADMIN_EXCLUDED or col.name in ADMIN_MODEL_EXCLUDED.get(model.__name__, set()):
+            continue
+        if col.name == "created_by":
+            continue
+        kind="text"
+        if col.type.__class__.__name__ in ("Boolean",): kind="bool"
+        elif col.type.__class__.__name__ in ("Date",): kind="date"
+        elif col.type.__class__.__name__ in ("Integer",): kind="int"
+        elif col.type.__class__.__name__ in ("Numeric", "Float", "REAL"):
+            kind="number"
+        # Foreign keys get a select with human-readable choices.
+        fk=next(iter(col.foreign_keys), None)
+        options=[]
+        if fk:
+            target=fk.column.table.name
+            target_model=next((m for m in ADMIN_MODELS.values() if m.__tablename__==target), None)
+            if target_model:
+                for obj in target_model.query.order_by(target_model.id).all():
+                    label=getattr(obj,"name",None) or getattr(obj,"number",None) or getattr(obj,"code",None) or str(obj.id)
+                    options.append((obj.id,label))
+                kind="select"
+        specs.append({"name":col.name,"label":col.name.replace("_"," ").title(),"kind":kind,"options":options,"value":None})
+    return specs
+
+@app.route("/admin/data")
+@login_required
+@admin_required
+def admin_data():
+    labels={"supplier":"Fornecedores","supplier_invoice":"Faturas de fornecedores","supplier_payment":"Pagamentos de fornecedores","contract":"Contratos","procedure":"Contratação pública","client":"Clientes","invoice":"Faturas legadas","payment":"Pagamentos legados","user":"Utilizadores","legal_rule":"Regras legais","legal_document":"Documentos legais","alert":"Alertas"}
+    datasets=[(k, ADMIN_MODELS[k], ADMIN_MODELS[k].query.order_by(ADMIN_MODELS[k].id.desc()).limit(100).all()) for k in ADMIN_MODELS]
+    return render_template("admin_data.html", datasets=datasets, labels=labels)
+
+@app.route("/admin/edit/<model>/<int:record_id>", methods=["GET","POST"])
+@login_required
+@admin_required
+def admin_edit(model, record_id):
+    cls=ADMIN_MODELS.get(model)
+    if not cls: return redirect(url_for("admin_data"))
+    obj=db.session.get(cls, record_id)
+    if not obj:
+        flash("Registo não encontrado.")
+        return redirect(url_for("admin_data"))
+    specs=admin_field_specs(cls)
+    for spec in specs:
+        spec["value"] = getattr(obj, spec["name"], None)
+    if request.method=="POST":
+        try:
+            for spec in specs:
+                name=spec["name"]; raw=request.form.get(name)
+                if spec["kind"]=="bool": val=(raw=="on")
+                elif spec["kind"]=="date": val=parse_date(raw, None)
+                elif spec["kind"]=="int": val=int(raw) if raw not in (None,"") else None
+                elif spec["kind"]=="number": val=num(raw) if raw not in (None,"") else None
+                elif spec["kind"]=="select": val=int(raw) if raw not in (None,"") else None
+                else: val=raw
+                setattr(obj,name,val)
+            db.session.commit()
+            if cls in (Supplier, Contract, ProcurementProcedure, SupplierInvoice, SupplierPayment): run_compliance_checks()
+            flash("Registo alterado com sucesso.")
+            return redirect(url_for("admin_data"))
+        except Exception as e:
+            db.session.rollback(); flash("Não foi possível alterar o registo: "+str(e))
+    return render_template("admin_edit.html", obj=obj, specs=specs, model=model)
+
+@app.route("/admin/delete/<model>/<int:record_id>", methods=["POST"])
+@login_required
+@admin_required
+def admin_delete(model, record_id):
+    cls=ADMIN_MODELS.get(model)
+    if not cls: return redirect(url_for("admin_data"))
+    obj=db.session.get(cls, record_id)
+    if not obj:
+        flash("Registo não encontrado."); return redirect(url_for("admin_data"))
+    if cls is User and obj.id == session.get("uid"):
+        flash("O administrador não pode eliminar a própria conta."); return redirect(url_for("admin_data"))
+    try:
+        db.session.delete(obj); db.session.commit(); flash("Registo eliminado com sucesso.")
+    except IntegrityError:
+        db.session.rollback(); flash("Não foi possível eliminar: existem registos relacionados. Altere ou elimine primeiro os registos dependentes.")
+    except Exception as e:
+        db.session.rollback(); flash("Erro ao eliminar: "+str(e))
+    return redirect(url_for("admin_data"))
 
 @app.route("/users", methods=["GET", "POST"])
 @login_required

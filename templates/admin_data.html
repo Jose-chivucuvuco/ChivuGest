@@ -1,0 +1,10 @@
+{% extends "base.html" %}{% block content %}
+<div class="pagehead"><div><h1>Administração de dados</h1><p class="muted">Área exclusiva do Administrador para editar, eliminar e corrigir dados dos módulos.</p></div></div>
+<div class="legal-note"><b>Regra de segurança:</b> somente o perfil <b>Administrador</b> possui os botões de Editar/Eliminar. Utilizadores comuns não recebem estas ações e as rotas também são protegidas no servidor.</div>
+{% for key, cls, rows in datasets %}
+<div class="panel" id="{{key}}"><div class="panelhead"><h2>{{labels[key]}}</h2><span>{{rows|length}} registo(s)</span></div>
+<table><tr><th>ID</th><th>Identificação</th><th>Resumo</th><th>Ações</th></tr>
+{% for obj in rows %}<tr><td>{{obj.id}}</td><td><b>{{obj.name or obj.number or obj.code or obj.title or obj.receipt or ('Registo #' ~ obj.id)}}</b></td><td>{% if obj.object %}{{obj.object[:100]}}{% elif obj.status %}{{obj.status}}{% elif obj.role %}{{obj.role}}{% elif obj.amount is not none %}Kz {{"{:,.2f}".format(obj.amount or 0)}}{% else %}Registo{% endif %}</td><td><a class="btn small secondary" href="/admin/edit/{{key}}/{{obj.id}}">Editar</a> <form method="post" action="/admin/delete/{{key}}/{{obj.id}}" style="display:inline" onsubmit="return confirm('Tem a certeza que deseja eliminar este registo? Esta operação pode afetar dados relacionados.')"><button class="btn small danger">Eliminar</button></form></td></tr>
+{% else %}<tr><td colspan="4" class="empty">Nenhum registo.</td></tr>{% endfor %}</table></div>
+{% endfor %}
+{% endblock %}
