@@ -191,6 +191,41 @@ class SupplierPayment(db.Model):
     invoice = db.relationship("SupplierInvoice", backref="payments")
     contract = db.relationship("Contract", backref="payments")
 
+class PaymentOrder(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    os_number = db.Column(db.String(120), nullable=False, index=True)
+    supplier_id = db.Column(db.Integer, db.ForeignKey("supplier.id"), nullable=False)
+    invoice_id = db.Column(db.Integer, db.ForeignKey("supplier_invoice.id"))
+    contract_id = db.Column(db.Integer, db.ForeignKey("contract.id"))
+    issue_date = db.Column(db.Date)
+    amount = db.Column(db.Numeric(18,2), default=0)
+    status = db.Column(db.String(50), default="Pendente")
+    bank_reference = db.Column(db.String(180))
+    source_type = db.Column(db.String(40), default="DocFonte")
+    source_filename = db.Column(db.String(255))
+    source_hash = db.Column(db.String(64), unique=True)
+    extracted_data = db.Column(db.Text)
+    reconciliation_status = db.Column(db.String(50), default="Por conferir")
+    reconciliation_notes = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    supplier = db.relationship("Supplier", backref="payment_orders")
+    invoice = db.relationship("SupplierInvoice", backref="payment_orders")
+    contract = db.relationship("Contract", backref="payment_orders")
+
+class SourceDocument(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    document_type = db.Column(db.String(50), nullable=False)
+    document_number = db.Column(db.String(120), index=True)
+    supplier_id = db.Column(db.Integer, db.ForeignKey("supplier.id"))
+    source_filename = db.Column(db.String(255), nullable=False)
+    source_hash = db.Column(db.String(64), unique=True, nullable=False)
+    issue_date = db.Column(db.Date)
+    amount = db.Column(db.Numeric(18,2), default=0)
+    extracted_data = db.Column(db.Text)
+    import_confidence = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    supplier = db.relationship("Supplier", backref="source_documents")
+
 class LegalRule(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     code = db.Column(db.String(100), unique=True, nullable=False)
@@ -228,6 +263,29 @@ class LegalDocument(db.Model):
     source_url = db.Column(db.String(500), nullable=False)
     current_version = db.Column(db.String(60), nullable=False)
     active = db.Column(db.Boolean, default=True)
+
+class AuditLog(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"))
+    action = db.Column(db.String(40), nullable=False)
+    model = db.Column(db.String(80))
+    record_id = db.Column(db.Integer)
+    details = db.Column(db.Text)
+    ip_address = db.Column(db.String(64))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    user = db.relationship("User")
+
+class BackupRecord(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    code = db.Column(db.String(80), unique=True, nullable=False)
+    created_by = db.Column(db.Integer, db.ForeignKey("user.id"))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    kind = db.Column(db.String(30), default="Completo")
+    file_name = db.Column(db.String(255))
+    sha256 = db.Column(db.String(64))
+    size_bytes = db.Column(db.Integer, default=0)
+    status = db.Column(db.String(30), default="Concluído")
+    user = db.relationship("User")
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -470,6 +528,127 @@ def uploaded_rows(f):
         return [{normalize_key(k): v for k, v in row.items()} for row in csv.DictReader(io.StringIO(s), dialect=dialect)]
     raise ValueError("Para tabelas use CSV/XLSX. Para documentos use PDF/imagem.")
 
+def extract_generic_source_document(file_storage):
+    """Extracts common DocFonte/ordem de saque fields from tabular or document files."""
+    filename=(file_storage.filename or "").lower()
+    raw=file_storage.read()
+    digest=hashlib.sha256(raw).hexdigest()
+    text_value=""
+    if filename.endswith((".csv", ".xlsx")):
+        # Reuse the flexible table reader with a fresh in-memory upload.
+        class FS:
+            def __init__(self, name, data): self.filename=name; self._data=data
+            def read(self): return self._data
+        rows=uploaded_rows(FS(file_storage.filename, raw))
+        text_value="\n".join("; ".join(f"{k}: {v}" for k,v in r.items()) for r in rows[:500])
+        first=rows[0] if rows else {}
+        data={
+            "os_number": str(row_value(first,"ordem_saque","ordem_de_saque","os","numero_os","n_os","ordem","numero_ordem","referencia")).strip(),
+            "supplier": str(row_value(first,"fornecedor","supplier","emitente","beneficiario")).strip(),
+            "nif": str(row_value(first,"nif","nuit","tax_id")).strip(),
+            "invoice_number": str(row_value(first,"fatura","factura","numero_fatura","invoice_number","documento")).strip(),
+            "date": row_value(first,"data","data_emissao","issue_date","data_os"),
+            "amount": num(row_value(first,"valor","valor_os","montante","amount","total")),
+            "status": str(row_value(first,"situacao","situação","status","estado") or "Pendente").strip(),
+            "bank_reference": str(row_value(first,"referencia_bancaria","referencia_banco","bank_reference","referencia")).strip(),
+        }
+    elif filename.endswith((".xml", ".json")):
+        raw_text=raw.decode("utf-8-sig", errors="ignore")
+        if filename.endswith(".json"):
+            obj=json.loads(raw_text); obj=obj[0] if isinstance(obj,list) and obj else obj
+            flat=[]
+            def walk(x,prefix=""):
+                if isinstance(x,dict):
+                    for k,v in x.items(): walk(v, f"{prefix}.{k}" if prefix else str(k))
+                elif isinstance(x,list):
+                    for i,v in enumerate(x): walk(v,f"{prefix}.{i}")
+                else: flat.append((prefix,x))
+            walk(obj); text_value="\n".join(f"{k}: {v}" for k,v in flat)
+        else:
+            root=ET.fromstring(raw); pairs=[]
+            for el in root.iter():
+                if el.text and el.text.strip(): pairs.append((el.tag.split('}')[-1],el.text.strip()))
+            text_value="\n".join(f"{k}: {v}" for k,v in pairs)
+        data={
+            "os_number": regex_first(text_value,[r"(?:ordem(?:\s+de)?\s+s[aá]que|OS|numero_ordem|numero_os)\s*[:=#-]?\s*([A-Z0-9./_-]+)" ]),
+            "supplier": regex_first(text_value,[r"(?:fornecedor|supplier|benefici[aá]rio|emitente)\s*[:=#-]?\s*([^\n,;]{3,120})"]),
+            "nif": regex_first(text_value,[r"(?:NIF|NUIT|tax_id)\s*[:=#-]?\s*([0-9]{8,15})"]),
+            "invoice_number": regex_first(text_value,[r"(?:fatura|factura|invoice)\s*(?:n[ºo°]?|numero|number)?\s*[:=#-]?\s*([A-Z0-9./_-]+)"]),
+            "date": regex_first(text_value,[r"(?:data|date)\s*[:=#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})"]),
+            "amount": num(regex_first(text_value,[r"(?:valor|montante|amount|total)\s*[:=#-]?\s*(?:AOA|KZ|AKZ)?\s*([0-9][0-9 .,'-]{1,})"])),
+            "status": regex_first(text_value,[r"(?:situa[cç][aã]o|status|estado)\s*[:=#-]?\s*([^\n,;]{3,50})"]) or "Pendente",
+            "bank_reference": regex_first(text_value,[r"(?:refer[eê]ncia banc[aá]ria|bank_reference|referencia)\s*[:=#-]?\s*([A-Z0-9./_-]+)"]),
+        }
+    elif filename.endswith((".pdf", ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff")):
+        class FS:
+            def __init__(self,name,data): self.filename=name; self._data=data
+            def read(self): return self._data
+        parsed=extract_pdf_or_image(FS(file_storage.filename, raw))
+        text_value=parsed.get("text","")
+        data={
+            "os_number": regex_first(text_value,[r"(?:ordem(?:\s+de)?\s+s[aá]que|OS|n[ºo°]\s*OS)\s*[:=#-]?\s*([A-Z0-9./_-]+)"]),
+            "supplier": parsed.get("supplier","") or regex_first(text_value,[r"(?:fornecedor|benefici[aá]rio|emitente)\s*[:=#-]\s*([^\n]{3,120})"]),
+            "nif": parsed.get("nif","") ,
+            "invoice_number": parsed.get("number","") ,
+            "date": parsed.get("date","") ,
+            "amount": parsed.get("total",0),
+            "status": regex_first(text_value,[r"(?:situa[cç][aã]o|status|estado)\s*[:=#-]?\s*([^\n]{3,50})"]) or "Pendente",
+            "bank_reference": regex_first(text_value,[r"(?:refer[eê]ncia banc[aá]ria|referencia banc[aá]ria|bank)\s*[:=#-]?\s*([A-Z0-9./_-]+)"]),
+        }
+    elif filename.endswith(".txt"):
+        text_value=raw.decode("utf-8-sig",errors="ignore")
+        data={
+            "os_number": regex_first(text_value,[r"(?:ordem(?:\s+de)?\s+s[aá]que|OS)\s*[:=#-]?\s*([A-Z0-9./_-]+)"]),
+            "supplier": regex_first(text_value,[r"(?:fornecedor|benefici[aá]rio|emitente)\s*[:=#-]?\s*([^\n]{3,120})"]),
+            "nif": regex_first(text_value,[r"(?:NIF|NUIT)\s*[:=#-]?\s*([0-9]{8,15})"]),
+            "invoice_number": regex_first(text_value,[r"(?:fatura|factura|invoice)\s*(?:n[ºo°]?|numero)?\s*[:=#-]?\s*([A-Z0-9./_-]+)"]),
+            "date": regex_first(text_value,[r"(?:data|date)\s*[:=#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})"]),
+            "amount": num(regex_first(text_value,[r"(?:valor|montante|amount|total)\s*[:=#-]?\s*(?:AOA|KZ|AKZ)?\s*([0-9][0-9 .,'-]{1,})"])),
+            "status": regex_first(text_value,[r"(?:situa[cç][aã]o|status|estado)\s*[:=#-]?\s*([^\n]{3,50})"]) or "Pendente",
+            "bank_reference": regex_first(text_value,[r"(?:refer[eê]ncia|referencia banc[aá]ria)\s*[:=#-]?\s*([A-Z0-9./_-]+)"]),
+        }
+    else:
+        raise ValueError("Formato não suportado. Use CSV, XLSX, PDF, TXT, XML, JSON, PNG, JPG/JPEG, WEBP ou TIFF.")
+    data["date_parsed"]=parse_date(data.get("date"), None)
+    data["hash"]=digest; data["filename"]=file_storage.filename; data["text"]=text_value[:120000]
+    score=sum(bool(data.get(k)) for k in ("os_number","supplier","invoice_number","date","amount"))*20
+    if data.get("nif"): score+=10
+    data["confidence"]=min(score,100)
+    return data
+
+def normalize_os_status(value):
+    s=unicodedata.normalize("NFKD",str(value or "Pendente")).encode("ascii","ignore").decode().lower().strip()
+    if "anulad" in s: return "Anulada"
+    if "devolvid" in s or "rejeitad" in s: return "Devolvida"
+    if "pag" in s or "liquid" in s or "efetivad" in s or "efectivad" in s: return "Paga"
+    if "process" in s or "banc" in s: return "Em processamento"
+    if "emitid" in s or "aprov" in s: return "Emitida"
+    return "Pendente"
+
+def match_payment_order(data):
+    supplier=None
+    nif=(data.get("nif") or "").strip()
+    if nif: supplier=Supplier.query.filter_by(nif=nif).first()
+    if not supplier and data.get("supplier"):
+        supplier=Supplier.query.filter(func.lower(Supplier.name)==str(data["supplier"]).strip().lower()).first()
+    invoice=None
+    if data.get("invoice_number"):
+        q=SupplierInvoice.query.filter_by(number=str(data["invoice_number"]).strip())
+        if supplier: q=q.filter_by(supplier_id=supplier.id)
+        invoice=q.first()
+    if not supplier and invoice: supplier=invoice.supplier
+    contract=invoice.contract if invoice else None
+    notes=[]
+    if supplier: notes.append("Fornecedor identificado")
+    else: notes.append("Fornecedor não identificado")
+    if invoice: notes.append("Fatura identificada")
+    else: notes.append("Fatura não identificada")
+    amount=money(data.get("amount"))
+    if invoice and abs(money(invoice.total)-amount) <= max(0.01, money(invoice.total)*0.01): notes.append("Valor compatível")
+    elif invoice: notes.append("Valor divergente")
+    status="Conferido" if supplier and invoice and (not invoice.total or abs(money(invoice.total)-amount)<=max(0.01,money(invoice.total)*0.01)) else "Por conferir"
+    return supplier,invoice,contract,status,"; ".join(notes)
+
 # -----------------------------------------------------------------------------
 # Legal rules and compliance engine. This is a rules assistant, not a legal
 # opinion. Thresholds are stored in the DB so administrators can update them
@@ -604,6 +783,107 @@ def run_compliance_checks():
     db.session.commit()
 
 # -----------------------------------------------------------------------------
+# Backup / recovery / audit (administrator only)
+# -----------------------------------------------------------------------------
+BACKUP_MODELS = [User, Client, Invoice, Payment, Supplier, ProcurementProcedure,
+                 Contract, SupplierInvoice, SupplierPayment, LegalRule, ComplianceAlert, LegalDocument]
+
+def audit(action, model=None, record_id=None, details=""):
+    try:
+        db.session.add(AuditLog(user_id=session.get("uid"), action=action, model=model,
+                                record_id=record_id, details=details[:4000],
+                                ip_address=request.headers.get("X-Forwarded-For", request.remote_addr)))
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+
+def json_value(v):
+    if isinstance(v, (date, datetime)): return v.isoformat()
+    if isinstance(v, Decimal): return str(v)
+    return v
+
+def make_backup_payload():
+    payload={"format":"ChivuGest Backup v1", "created_at":datetime.utcnow().isoformat()+"Z", "tables":{}}
+    for cls in BACKUP_MODELS:
+        rows=[]
+        for obj in cls.query.order_by(cls.id).all():
+            rows.append({c.name: json_value(getattr(obj,c.name)) for c in inspect(cls).columns})
+        payload["tables"][cls.__tablename__]=rows
+    return payload
+
+def restore_value(col, raw):
+    if raw is None: return None
+    n=col.type.__class__.__name__
+    if n=="Date": return parse_date(raw, None)
+    if n in ("DateTime",): return datetime.fromisoformat(raw.replace("Z","+00:00")).replace(tzinfo=None)
+    if n in ("Numeric","Float","REAL"): return Decimal(str(raw))
+    if n=="Integer": return int(raw)
+    if n=="Boolean": return bool(raw)
+    return raw
+
+def restore_payload(payload):
+    if payload.get("format") != "ChivuGest Backup v1": raise ValueError("Formato de backup inválido.")
+    table_to_model={m.__tablename__:m for m in BACKUP_MODELS}
+    # Delete dependents first; audit and backup history remain untouched.
+    delete_order=[SupplierPayment, SupplierInvoice, Contract, ProcurementProcedure, ComplianceAlert,
+                  Payment, Invoice, LegalRule, LegalDocument, Supplier, Client, User]
+    for cls in delete_order:
+        cls.query.delete(synchronize_session=False)
+    db.session.flush()
+    # Insert parents before dependents.
+    insert_order=[User, Client, Supplier, LegalRule, LegalDocument, ProcurementProcedure, Contract,
+                  Invoice, Payment, SupplierInvoice, SupplierPayment, ComplianceAlert]
+    for cls in insert_order:
+        rows=payload.get("tables",{}).get(cls.__tablename__,[])
+        cols={c.name:c for c in inspect(cls).columns}
+        for row in rows:
+            obj=cls()
+            for name, raw in row.items():
+                if name in cols: setattr(obj,name,restore_value(cols[name],raw))
+            db.session.add(obj)
+        db.session.flush()
+    db.session.commit()
+
+@app.route("/admin/backup", methods=["GET","POST"])
+@login_required
+@admin_required
+def backup_center():
+    if request.method=="POST" and request.form.get("action")=="create":
+        payload=make_backup_payload()
+        raw=json.dumps(payload, ensure_ascii=False, separators=(",",":"), default=json_value).encode("utf-8")
+        digest=hashlib.sha256(raw).hexdigest()
+        code="BKP-"+datetime.now().strftime("%Y%m%d-%H%M%S")+"-"+secrets.token_hex(3).upper()
+        fname=code+".json"
+        rec=BackupRecord(code=code, created_by=session.get("uid"), file_name=fname, sha256=digest, size_bytes=len(raw))
+        db.session.add(rec); db.session.commit(); audit("BACKUP_CREATE","BackupRecord",rec.id,fname)
+        return Response(raw,mimetype="application/json; charset=utf-8",headers={"Content-Disposition":f"attachment; filename={fname}","X-ChivuGest-Backup-SHA256":digest})
+    return render_template("backup.html", backups=BackupRecord.query.order_by(BackupRecord.created_at.desc()).limit(50).all(), audits=AuditLog.query.order_by(AuditLog.created_at.desc()).limit(30).all())
+
+@app.route("/admin/backup/restore", methods=["POST"])
+@login_required
+@admin_required
+def backup_restore():
+    f=request.files.get("backup_file")
+    if not f or not f.filename.lower().endswith(".json"):
+        flash("Selecione um ficheiro de backup JSON válido."); return redirect(url_for("backup_center"))
+    if request.form.get("confirmation")!="RESTAURAR":
+        flash("Para restaurar, escreva exatamente RESTAURAR."); return redirect(url_for("backup_center"))
+    try:
+        payload=json.load(f.stream)
+        restore_payload(payload)
+        audit("BACKUP_RESTORE","Backup",None,f"Restauro a partir de {f.filename}")
+        flash("Backup restaurado com sucesso. Verifique os dados e faça novo login se necessário.")
+    except Exception as e:
+        db.session.rollback(); flash("Falha ao restaurar o backup: "+str(e))
+    return redirect(url_for("backup_center"))
+
+@app.route("/admin/audit")
+@login_required
+@admin_required
+def audit_center():
+    return render_template("audit.html", rows=AuditLog.query.order_by(AuditLog.created_at.desc()).limit(300).all())
+
+# -----------------------------------------------------------------------------
 # Auth
 # -----------------------------------------------------------------------------
 @app.route("/login", methods=["GET", "POST"])
@@ -643,10 +923,11 @@ def dashboard():
     maxv = max([m["value"] for m in months], default=0)
     for m in months: m["height"] = 20 + (m["value"]/(maxv or 1))*180
     run_compliance_checks()
+    latest_backup = BackupRecord.query.order_by(BackupRecord.created_at.desc()).first()
     return render_template("dashboard.html", total_invoices=total_invoices, total_paid=total_paid, payable=payable,
                            overdue=overdue, contracts_active=contracts_active, expiring=expiring,
                            critical_alerts=critical_alerts, alert_count=alert_count, suppliers=suppliers,
-                           recent_payments=recent_payments, recent_contracts=recent_contracts, months=months)
+                           recent_payments=recent_payments, recent_contracts=recent_contracts, months=months, latest_backup=latest_backup)
 
 # -----------------------------------------------------------------------------
 # Suppliers
@@ -712,7 +993,66 @@ def supplier_payments():
             db.session.add(p); db.session.commit(); flash("Pagamento registado.")
         except Exception as e:
             db.session.rollback(); flash("Erro no pagamento: "+str(e))
-    return render_template("supplier_payments.html", rows=SupplierPayment.query.order_by(SupplierPayment.id.desc()).all(), suppliers=suppliers_list, invoices=invoices, contracts=contracts)
+    return render_template("supplier_payments.html", rows=SupplierPayment.query.order_by(SupplierPayment.id.desc()).all(), orders=PaymentOrder.query.order_by(PaymentOrder.id.desc()).limit(200).all(), suppliers=suppliers_list, invoices=invoices, contracts=contracts)
+
+@app.route("/payments/import-documents", methods=["POST"])
+@login_required
+def import_payment_documents():
+    f=request.files.get("file")
+    source_type=request.form.get("source_type","DocFonte")
+    if not f or not f.filename:
+        flash("Selecione um ficheiro para importar."); return redirect(url_for("supplier_payments"))
+    try:
+        filename=(f.filename or "").lower()
+        created=0
+        if filename.endswith((".csv", ".xlsx")):
+            rows=uploaded_rows(f)
+            for r in rows:
+                parsed={
+                    "os_number": str(row_value(r,"ordem_saque","ordem_de_saque","os","numero_os","n_os","ordem","numero_ordem","referencia")).strip(),
+                    "supplier": str(row_value(r,"fornecedor","supplier","emitente","beneficiario","beneficiario")).strip(),
+                    "nif": str(row_value(r,"nif","nuit","tax_id")).strip(),
+                    "invoice_number": str(row_value(r,"fatura","factura","numero_fatura","invoice_number","documento")).strip(),
+                    "date": row_value(r,"data","data_emissao","issue_date","data_os"),
+                    "amount": num(row_value(r,"valor","valor_os","montante","amount","total")),
+                    "status": str(row_value(r,"situacao","situacao_os","status","estado") or "Pendente").strip(),
+                    "bank_reference": str(row_value(r,"referencia_bancaria","referencia_banco","bank_reference","referencia")).strip(),
+                }
+                parsed["date_parsed"]=parse_date(parsed.get("date"),None); parsed["filename"]=f.filename
+                parsed["confidence"]=min(100, sum(bool(parsed.get(k)) for k in ("os_number","supplier","invoice_number","date","amount"))*20 + (10 if parsed.get("nif") else 0))
+                if not parsed["os_number"]: continue
+                # Stable row hash avoids duplicate imports while preserving one hash per OS row.
+                parsed["hash"]=hashlib.sha256((hashlib.sha256(f.getvalue()).hexdigest()+json.dumps(parsed,sort_keys=True,default=str)).encode()).hexdigest()
+                if PaymentOrder.query.filter_by(source_hash=parsed["hash"]).first(): continue
+                supplier,invoice,contract,recon_status,recon_notes=match_payment_order(parsed)
+                if not supplier:
+                    sname=(parsed.get("supplier") or "Fornecedor a identificar").strip()
+                    supplier=Supplier.query.filter_by(name=sname).first()
+                    if not supplier:
+                        supplier=Supplier(name=sname,nif=parsed.get("nif") or None,contracting_type="Outro / Regime especial")
+                        db.session.add(supplier); db.session.flush()
+                doc=SourceDocument(document_type=source_type,document_number=parsed["os_number"],supplier_id=supplier.id,source_filename=f.filename,source_hash=parsed["hash"],issue_date=parsed["date_parsed"],amount=parsed["amount"],extracted_data=json.dumps(parsed,ensure_ascii=False),import_confidence=parsed["confidence"])
+                osr=PaymentOrder(os_number=parsed["os_number"],supplier_id=supplier.id,invoice_id=invoice.id if invoice else None,contract_id=contract.id if contract else None,issue_date=parsed["date_parsed"],amount=parsed["amount"],status=normalize_os_status(parsed["status"]),bank_reference=parsed["bank_reference"],source_type=source_type,source_filename=f.filename,source_hash=parsed["hash"],extracted_data=json.dumps(parsed,ensure_ascii=False),reconciliation_status=recon_status,reconciliation_notes=recon_notes)
+                db.session.add_all([doc,osr]); created+=1
+            db.session.commit()
+        else:
+            parsed=extract_generic_source_document(f)
+            if SourceDocument.query.filter_by(source_hash=parsed["hash"]).first() or PaymentOrder.query.filter_by(source_hash=parsed["hash"]).first():
+                raise ValueError("Este documento já foi importado anteriormente.")
+            supplier,invoice,contract,recon_status,recon_notes=match_payment_order(parsed)
+            if not supplier:
+                sname=(parsed.get("supplier") or "Fornecedor a identificar").strip()
+                supplier=Supplier.query.filter_by(name=sname).first()
+                if not supplier:
+                    supplier=Supplier(name=sname,nif=parsed.get("nif") or None,contracting_type="Outro / Regime especial")
+                    db.session.add(supplier); db.session.flush()
+            doc=SourceDocument(document_type=source_type,document_number=parsed.get("os_number") or parsed.get("invoice_number") or None,supplier_id=supplier.id,source_filename=parsed["filename"],source_hash=parsed["hash"],issue_date=parsed.get("date_parsed"),amount=parsed.get("amount",0),extracted_data=json.dumps(parsed,ensure_ascii=False),import_confidence=parsed.get("confidence",0))
+            osr=PaymentOrder(os_number=parsed.get("os_number") or parsed.get("invoice_number") or "SEM-NUMERO",supplier_id=supplier.id,invoice_id=invoice.id if invoice else None,contract_id=contract.id if contract else None,issue_date=parsed.get("date_parsed"),amount=parsed.get("amount",0),status=normalize_os_status(parsed.get("status")),bank_reference=parsed.get("bank_reference"),source_type=source_type,source_filename=parsed["filename"],source_hash=parsed["hash"],extracted_data=json.dumps(parsed,ensure_ascii=False),reconciliation_status=recon_status,reconciliation_notes=recon_notes)
+            db.session.add_all([doc,osr]); created=1; db.session.commit()
+        flash(f"Importação concluída: {created} documento(s)/ordem(ns) de saque. As informações foram cruzadas por fornecedor, NIF, fatura, valor e situação.")
+    except Exception as e:
+        db.session.rollback(); flash("Erro na importação do documento: "+str(e))
+    return redirect(url_for("supplier_payments"))
 
 @app.route("/current")
 @login_required
@@ -893,7 +1233,7 @@ ADMIN_MODELS = {
     "supplier": Supplier, "supplier_invoice": SupplierInvoice, "supplier_payment": SupplierPayment,
     "contract": Contract, "procedure": ProcurementProcedure, "client": Client, "invoice": Invoice,
     "payment": Payment, "user": User, "legal_rule": LegalRule, "legal_document": LegalDocument,
-    "alert": ComplianceAlert,
+    "alert": ComplianceAlert, "payment_order": PaymentOrder, "source_document": SourceDocument,
 }
 # Fields that are generated/system-only or intentionally removed from the supplier UI.
 ADMIN_EXCLUDED = {"id", "created_at", "password_hash", "source_hash", "raw_text", "extracted_data", "import_confidence"}
@@ -932,7 +1272,7 @@ def admin_field_specs(model):
 @login_required
 @admin_required
 def admin_data():
-    labels={"supplier":"Fornecedores","supplier_invoice":"Faturas de fornecedores","supplier_payment":"Pagamentos de fornecedores","contract":"Contratos","procedure":"Contratação pública","client":"Clientes","invoice":"Faturas legadas","payment":"Pagamentos legados","user":"Utilizadores","legal_rule":"Regras legais","legal_document":"Documentos legais","alert":"Alertas"}
+    labels={"supplier":"Fornecedores","supplier_invoice":"Faturas de fornecedores","supplier_payment":"Pagamentos de fornecedores","contract":"Contratos","procedure":"Contratação pública","client":"Clientes","invoice":"Faturas legadas","payment":"Pagamentos legados","user":"Utilizadores","legal_rule":"Regras legais","legal_document":"Documentos legais","alert":"Alertas", "payment_order":"Ordens de Saque", "source_document":"Documentos Fonte"}
     datasets=[(k, ADMIN_MODELS[k], ADMIN_MODELS[k].query.order_by(ADMIN_MODELS[k].id.desc()).limit(100).all()) for k in ADMIN_MODELS]
     return render_template("admin_data.html", datasets=datasets, labels=labels)
 
@@ -961,6 +1301,7 @@ def admin_edit(model, record_id):
                 else: val=raw
                 setattr(obj,name,val)
             db.session.commit()
+            audit("EDIT", cls.__name__, obj.id, "Registo alterado pelo administrador")
             if cls in (Supplier, Contract, ProcurementProcedure, SupplierInvoice, SupplierPayment): run_compliance_checks()
             flash("Registo alterado com sucesso.")
             return redirect(url_for("admin_data"))
@@ -980,7 +1321,7 @@ def admin_delete(model, record_id):
     if cls is User and obj.id == session.get("uid"):
         flash("O administrador não pode eliminar a própria conta."); return redirect(url_for("admin_data"))
     try:
-        db.session.delete(obj); db.session.commit(); flash("Registo eliminado com sucesso.")
+        db.session.delete(obj); db.session.commit(); audit("DELETE", cls.__name__, record_id, "Registo eliminado pelo administrador"); flash("Registo eliminado com sucesso.")
     except IntegrityError:
         db.session.rollback(); flash("Não foi possível eliminar: existem registos relacionados. Altere ou elimine primeiro os registos dependentes.")
     except Exception as e:
