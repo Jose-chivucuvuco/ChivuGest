@@ -533,19 +533,6 @@ def run_compliance_checks():
         if not s.contracting_type:
             add_alert("FORNECEDOR_SEM_TIPO", "CRITICO", "Fornecedor sem tipo de contratação",
                       f"O fornecedor {s.name} não tem tipo de contratação definido.", "Controlo interno", s.id)
-        if s.blocked or str(s.portal_status).lower().startswith("bloque"):
-            add_alert("FORNECEDOR_BLOQUEADO", "CRITICO", "Fornecedor bloqueado",
-                      f"O fornecedor {s.name} está marcado como bloqueado. Rever antes de adjudicar, contratar ou pagar.",
-                      "Lei 41/20, Art. 56.º–57.º", s.id)
-        for label, expiry in (("Certidão fiscal", s.tax_clearance_expiry), ("Segurança Social", s.social_security_expiry), ("Licença profissional", s.professional_license_expiry)):
-            if expiry:
-                days=(expiry-today).days
-                if days < 0:
-                    add_alert("DOC_FORNECEDOR_EXPIRADO", "CRITICO", f"{label} expirada",
-                              f"{label} do fornecedor {s.name} expirou em {expiry.strftime('%d/%m/%Y')}.", "Controlo de habilitação do fornecedor", s.id)
-                elif days <= 30:
-                    add_alert("DOC_FORNECEDOR_A_EXPIRAR", "ALERTA", f"{label} a expirar",
-                              f"{label} do fornecedor {s.name} expira em {days} dia(s).", "Controlo de habilitação do fornecedor", s.id)
     # Contracts and expiration alerts.
     for c in Contract.query.all():
         days = (c.end_date - today).days
@@ -667,12 +654,8 @@ def suppliers():
         try:
             s = Supplier(name=request.form["name"].strip(), nif=request.form.get("nif"), phone=request.form.get("phone"),
                          email=request.form.get("email"), address=request.form.get("address"), category=request.form.get("category"),
-                         contracting_type=request.form["contracting_type"], portal_status=request.form.get("portal_status","Não verificado"),
-                         certification_status=request.form.get("certification_status","Não informado"),
-                         tax_clearance_expiry=parse_date(request.form.get("tax_clearance_expiry"), None),
-                         social_security_expiry=parse_date(request.form.get("social_security_expiry"), None),
-                         professional_license_expiry=parse_date(request.form.get("professional_license_expiry"), None),
-                         blocked=bool(request.form.get("blocked")), notes=request.form.get("notes"))
+                         contracting_type=request.form["contracting_type"],
+                         notes=request.form.get("notes"))
             db.session.add(s); db.session.commit(); flash("Fornecedor criado. O tipo de contratação é obrigatório para acompanhamento.")
         except Exception as e:
             db.session.rollback(); flash("Não foi possível criar o fornecedor: "+str(e))
