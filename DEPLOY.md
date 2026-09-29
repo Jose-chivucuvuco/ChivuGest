@@ -23,3 +23,18 @@ PDF digital pode ser lido com PyMuPDF. PDF escaneado depende do Tesseract OCR no
 
 ## Dados
 Não use SQLite para vários computadores em produção. Use PostgreSQL através de `DATABASE_URL`.
+
+
+## Parâmetros legais e actualização automática
+
+Para activar a verificação automática das fontes legais:
+- `AUTO_LEGAL_CHECK=true`
+- `LEGAL_CHECK_INTERVAL_HOURS=6`
+
+A verificação consulta as fontes configuradas, regista o hash do conteúdo e cria um histórico. Se houver alteração, o estado fica como **Alteração detectada — validação necessária**. O ChivuGest não altera automaticamente limites ou regras jurídicas a partir de texto não validado.
+
+A opção manual **Verificar actualizações agora** está disponível em **Base legal** para administradores.
+
+## Nota sobre actualização da base de dados
+
+A versão usa `db.create_all()` e as novas tabelas legais são aditivas. Não devem ser apagadas as bases de dados existentes durante a actualização.

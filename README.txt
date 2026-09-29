@@ -37,3 +37,17 @@ O Dockerfile instala tesseract-ocr, tesseract-ocr-por e tesseract-ocr-eng.
 
 
 CORREÇÃO OOM/OCR: processamento OCR limitado a imagens de 2600 px, PDF até 20 páginas, 1.5 DPI, escala de cinza e recolha de memória; upload máximo 20 MB.
+
+
+ACTUALIZAÇÃO CONSOLIDADA — 29/09/2026
+
+Esta versão inclui:
+- Faturas simplificadas: Nº, fornecedor, contrato opcional, emissão e valor.
+- Subtotal, IVA e vencimento retirados do formulário manual de registo; os campos antigos permanecem na base de dados para compatibilidade com importações/histórico.
+- Pagamentos continuam a actualizar automaticamente o valor pago e o estado da fatura.
+- Gestão de Contratos reorganizada e com preenchimento automático a partir do procedimento associado.
+- Gestão de Contratos calcula Faturado, Pago, Saldo e % de execução com base nas faturas/pagamentos ligados ao contrato.
+- Contratação Pública organizada em Identificação, Execução e Conformidade.
+- Base legal com versões, exercício, entrada em vigor, histórico de verificações e detecção de alterações nas fontes.
+- A verificação de fontes legais não interpreta automaticamente uma alteração como nova regra. Alterações detectadas ficam sujeitas a validação humana antes da alteração dos parâmetros.
+- Verificação automática opcional: AUTO_LEGAL_CHECK=true; LEGAL_CHECK_INTERVAL_HOURS=6.

@@ -1,1 +1,26 @@
-{% extends "base.html" %}{% block content %}<div class="pagehead"><div><h1>Base legal e motor de conformidade</h1><p class="muted">Referências legais utilizadas pelo sistema para gerar alertas.</p></div></div><div class="panel"><h2>Diplomas de referência</h2><table><tr><th>Diploma</th><th>Descrição</th><th>Versão</th><th>Fonte</th></tr>{% for d in documents %}<tr><td>{{d.name}}</td><td>{{d.description}}</td><td>{{d.current_version}}</td><td><a href="{{d.source_url}}" target="_blank">Fonte</a></td></tr>{% endfor %}</table></div><div class="panel"><h2>Regras automatizadas</h2><table><tr><th>Regra</th><th>Artigo</th><th>Resumo</th><th>Severidade</th></tr>{% for r in rules %}<tr><td>{{r.title}}</td><td>{{r.source}} — {{r.article}}</td><td>{{r.summary}}</td><td>{{r.severity}}</td></tr>{% endfor %}</table></div>{% endblock %}
+{% extends "base.html" %}
+{% block content %}
+<div class="pagehead">
+ <div><h1>Base legal e motor de conformidade</h1><p class="muted">Fontes legais, versões e regras utilizadas pelo ChivuGest.</p></div>
+ {% if session.role=='admin' %}<form method="post" action="/legal/check"><button class="btn">Verificar actualizações agora</button></form>{% endif %}
+</div>
+<div class="legal-note"><b>Actualização controlada:</b> o ChivuGest verifica as fontes configuradas e regista alterações. Uma alteração detectada fica pendente de validação humana; o sistema não transforma texto da Internet automaticamente em regra jurídica.</div>
+
+<div class="panel"><div class="panelhead"><h2>Diplomas de referência</h2><span>{{documents|length}} fonte(s)</span></div>
+<table><tr><th>Diploma</th><th>Versão</th><th>Fonte</th><th>Última verificação</th><th>Estado</th></tr>
+{% for d in documents %}
+{% set checks=checks|selectattr('document_id','equalto',d.id)|list %}
+{% set last=checks[0] if checks else None %}
+<tr><td><b>{{d.name}}</b><br><small>{{d.description}}</small></td><td>{{d.current_version}}</td><td><a href="{{d.source_url}}" target="_blank" rel="noopener">Abrir fonte</a></td><td>{{last.checked_at.strftime('%d/%m/%Y %H:%M') if last else 'Ainda não verificada'}}</td><td>{% if last and last.changed %}<span class="badge redbg">Alteração detectada</span>{% elif last %}<span class="badge green">Sem alteração</span>{% else %}<span class="badge">Pendente</span>{% endif %}</td></tr>
+{% endfor %}</table></div>
+
+<div class="panel"><h2>Regras automatizadas</h2>
+<table><tr><th>Regra</th><th>Artigo</th><th>Resumo</th><th>Parâmetro</th><th>Valor</th><th>Severidade</th></tr>
+{% for r in rules %}<tr><td>{{r.title}}</td><td>{{r.source}} — {{r.article}}</td><td>{{r.summary}}</td><td>{{r.parameter or '—'}}</td><td>{{r.value if r.value is not none else '—'}}</td><td>{{r.severity}}</td></tr>{% endfor %}
+</table></div>
+
+<div class="panel"><h2>Histórico de verificações</h2>
+<table><tr><th>Data</th><th>Diploma</th><th>Estado</th><th>Mensagem</th></tr>
+{% for c in checks[:20] %}<tr><td>{{c.checked_at.strftime('%d/%m/%Y %H:%M')}}</td><td>{{c.document.name}}</td><td>{{c.status}}</td><td>{{c.message}}</td></tr>{% else %}<tr><td colspan="4" class="empty">Ainda não existem verificações.</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

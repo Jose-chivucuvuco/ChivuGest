@@ -1,4 +1,4 @@
-import os, csv, io, re, json, hashlib, secrets, unicodedata, xml.etree.ElementTree as ET
+import os, csv, io, re, json, hashlib, secrets, unicodedata, urllib.request, urllib.error, xml.etree.ElementTree as ET
 from datetime import datetime, date, timedelta
 from functools import wraps
 from decimal import Decimal, InvalidOperation
@@ -264,6 +264,29 @@ class LegalDocument(db.Model):
     current_version = db.Column(db.String(60), nullable=False)
     active = db.Column(db.Boolean, default=True)
 
+class LegalVersion(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    document_id = db.Column(db.Integer, db.ForeignKey("legal_document.id"), nullable=False)
+    version = db.Column(db.String(80), nullable=False)
+    exercise = db.Column(db.Integer)
+    effective_from = db.Column(db.Date)
+    effective_to = db.Column(db.Date)
+    source_hash = db.Column(db.String(64))
+    source_url = db.Column(db.String(500))
+    status = db.Column(db.String(40), default="Vigente")
+    notes = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    document = db.relationship("LegalDocument", backref="versions")
+
+class LegalUpdateCheck(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    document_id = db.Column(db.Integer, db.ForeignKey("legal_document.id"), nullable=False)
+    checked_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    source_hash = db.Column(db.String(64))
+    changed = db.Column(db.Boolean, default=False)
+    status = db.Column(db.String(40), default="Sem alteração")
+    message = db.Column(db.Text)
+    document = db.relationship("LegalDocument")
 class AuditLog(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"))
@@ -694,6 +717,78 @@ def seed_legal_data():
     db.session.commit()
 
 
+def _fetch_legal_source(url, timeout=6):
+    """Fetch an authoritative/legal source for change detection only.
+    The content is never interpreted automatically as a new legal rule.
+    """
+    req = urllib.request.Request(url, headers={"User-Agent": "ChivuGest-Legal-Checker/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = resp.read(2_000_000)
+        return hashlib.sha256(data).hexdigest(), resp.geturl()
+
+def seed_legal_versions():
+    for doc in LegalDocument.query.all():
+        if not LegalVersion.query.filter_by(document_id=doc.id).first():
+            version = doc.current_version
+            year_match = re.search(r"(20\d{2})", version or "")
+            short_year = re.search(r"/(\d{2})$", version or "")
+            exercise = int(year_match.group(1)) if year_match else (2000 + int(short_year.group(1)) if short_year else date.today().year)
+            db.session.add(LegalVersion(
+                document_id=doc.id, version=version, exercise=exercise,
+                effective_from=date(exercise, 1, 1) if exercise else None,
+                source_url=doc.source_url, status="Vigente",
+                notes="Versão inicial registada pelo ChivuGest."
+            ))
+    db.session.commit()
+
+def check_legal_updates():
+    """Check configured legal sources and register changes for validation.
+    A changed source becomes 'Pendente de validação'; no legal parameter is
+    changed automatically from unverified web content.
+    """
+    results = []
+    for doc in LegalDocument.query.filter_by(active=True).all():
+        try:
+            digest, final_url = _fetch_legal_source(doc.source_url)
+            previous = LegalUpdateCheck.query.filter_by(document_id=doc.id).order_by(LegalUpdateCheck.checked_at.desc()).first()
+            changed = bool(previous and previous.source_hash and previous.source_hash != digest)
+            status = "Alteração detectada — validação necessária" if changed else "Sem alteração"
+            message = ("A fonte apresentou conteúdo diferente da última verificação. "
+                       "É necessária validação humana antes de alterar regras/limites.")
+            if not previous:
+                message = "Primeira verificação registada."
+            db.session.add(LegalUpdateCheck(document_id=doc.id, source_hash=digest, changed=changed,
+                                            status=status, message=message))
+            results.append((doc.name, status))
+        except Exception as exc:
+            db.session.add(LegalUpdateCheck(document_id=doc.id, source_hash=None, changed=False,
+                                            status="Erro na verificação", message=str(exc)))
+            results.append((doc.name, "Erro na verificação"))
+    db.session.commit()
+    return results
+
+def maybe_auto_check_legal_updates():
+    """Optional automatic source check.
+    Enable with AUTO_LEGAL_CHECK=true. The check runs at most once per
+    LEGAL_CHECK_INTERVAL_HOURS and never applies unverified rules automatically.
+    """
+    if os.environ.get("AUTO_LEGAL_CHECK", "false").lower() not in ("1", "true", "yes"):
+        return
+    try:
+        interval = float(os.environ.get("LEGAL_CHECK_INTERVAL_HOURS", "6"))
+        latest = LegalUpdateCheck.query.order_by(LegalUpdateCheck.checked_at.desc()).first()
+        if latest and (datetime.utcnow() - latest.checked_at).total_seconds() < interval * 3600:
+            return
+        check_legal_updates()
+    except Exception:
+        # Never block the application because an external legal source is unavailable.
+        db.session.rollback()
+
+@app.before_request
+def automatic_legal_source_check():
+    if request.endpoint not in ("static", "health", "login") and request.method == "GET":
+        maybe_auto_check_legal_updates()
+
 def get_rule_value(code, default):
     r = LegalRule.query.filter_by(code=code, active=True).first()
     return float(r.value) if r and r.value is not None else default
@@ -786,7 +881,7 @@ def run_compliance_checks():
 # Backup / recovery / audit (administrator only)
 # -----------------------------------------------------------------------------
 BACKUP_MODELS = [User, Client, Invoice, Payment, Supplier, ProcurementProcedure,
-                 Contract, SupplierInvoice, SupplierPayment, LegalRule, ComplianceAlert, LegalDocument]
+                 Contract, SupplierInvoice, SupplierPayment, LegalRule, ComplianceAlert, LegalDocument, LegalVersion, LegalUpdateCheck]
 
 def audit(action, model=None, record_id=None, details=""):
     try:
@@ -957,18 +1052,27 @@ def supplier_invoices():
     if request.method == "POST":
         try:
             supplier = db.session.get(Supplier, int(request.form["supplier_id"]))
+            if not supplier:
+                raise ValueError("Fornecedor inválido.")
             total = num(request.form["total"])
-            paid = num(request.form.get("paid"))
-            inv = SupplierInvoice(number=request.form["number"].strip(), supplier_id=supplier.id,
+            if total <= 0:
+                raise ValueError("O valor da fatura deve ser superior a zero.")
+            # Paid is controlled by the Payments module, not manually entered on the invoice.
+            inv = SupplierInvoice(
+                number=request.form["number"].strip(),
+                supplier_id=supplier.id,
                 contract_id=int(request.form["contract_id"]) if request.form.get("contract_id") else None,
-                issue_date=parse_date(request.form.get("issue_date")), due_date=parse_date(request.form.get("due_date"), None),
-                subtotal=num(request.form.get("subtotal")), vat=num(request.form.get("vat")), total=total, paid=paid,
-                currency=request.form.get("currency","AOA"), status="Paga" if paid>=total and total>0 else ("Parcial" if paid>0 else "Pendente"),
-                source_filename=request.form.get("source_filename"))
-            db.session.add(inv); db.session.commit(); flash("Fatura de fornecedor registada.")
+                issue_date=parse_date(request.form.get("issue_date")),
+                # Due date, subtotal, VAT and currency remain in the database for legacy/import
+                # compatibility but are intentionally not requested in the simplified UI.
+                due_date=None, subtotal=0, vat=0, total=total, paid=0, currency="AOA",
+                status="Pendente", source_filename=request.form.get("source_filename"))
+            db.session.add(inv); db.session.commit()
+            flash("Fatura registada. O valor pago será actualizado através do módulo Pagamentos.")
         except Exception as e:
             db.session.rollback(); flash("Erro ao registar fatura: "+str(e))
-    return render_template("supplier_invoices.html", rows=SupplierInvoice.query.order_by(SupplierInvoice.id.desc()).all(), suppliers=suppliers_list, contracts=contracts)
+    rows = SupplierInvoice.query.order_by(SupplierInvoice.id.desc()).all()
+    return render_template("supplier_invoices.html", rows=rows, suppliers=suppliers_list, contracts=contracts)
 
 @app.route("/payments", methods=["GET", "POST"])
 @login_required
@@ -1077,23 +1181,54 @@ def current_account():
 @app.route("/contracts", methods=["GET", "POST"])
 @login_required
 def contracts():
-    suppliers_list=Supplier.query.order_by(Supplier.name).all(); procedures=ProcurementProcedure.query.order_by(ProcurementProcedure.code).all()
+    suppliers_list=Supplier.query.order_by(Supplier.name).all()
+    procedures=ProcurementProcedure.query.order_by(ProcurementProcedure.code).all()
     if request.method == "POST":
         try:
-            c=Contract(number=request.form["number"], supplier_id=int(request.form["supplier_id"]),
-                procedure_id=int(request.form["procedure_id"]) if request.form.get("procedure_id") else None,
-                object=request.form["object"], contract_type=request.form["contract_type"], procedure_type=request.form["procedure_type"],
-                start_date=parse_date(request.form["start_date"]), end_date=parse_date(request.form["end_date"]),
-                original_value=num(request.form["original_value"]), current_value=num(request.form.get("current_value") or request.form["original_value"]),
+            procedure = db.session.get(ProcurementProcedure, int(request.form["procedure_id"])) if request.form.get("procedure_id") else None
+            supplier_id = int(request.form["supplier_id"]) if request.form.get("supplier_id") else None
+            contract_type = request.form.get("contract_type") or "Serviços"
+            procedure_type = request.form.get("procedure_type") or ""
+            object_value = request.form.get("object", "").strip()
+
+            # If a procedure is selected, its core data becomes the source of truth.
+            if procedure:
+                supplier_id = procedure.supplier_id or supplier_id
+                contract_type = procedure.contract_category or contract_type
+                procedure_type = procedure.procedure_type or procedure_type
+                object_value = procedure.object or object_value
+            if not supplier_id:
+                raise ValueError("Selecione o fornecedor ou associe um procedimento com fornecedor.")
+            if not object_value:
+                raise ValueError("Indique o objecto do contrato.")
+            start_date=parse_date(request.form["start_date"])
+            end_date=parse_date(request.form["end_date"])
+            original=num(request.form["original_value"])
+            current=num(request.form.get("current_value") or original)
+            c=Contract(number=request.form["number"], supplier_id=supplier_id,
+                procedure_id=procedure.id if procedure else None,
+                object=object_value, contract_type=contract_type, procedure_type=procedure_type,
+                start_date=start_date, end_date=end_date,
+                original_value=original, current_value=current,
                 renewal_allowed=bool(request.form.get("renewal_allowed")), renewal_count=int(request.form.get("renewal_count") or 0),
-                cabimentado=bool(request.form.get("cabimentado")), cabimentacao_ref=request.form.get("cabimentacao_ref"),
+                cabimentado=bool(request.form.get("cabimentado")) or bool(procedure.cabimentado if procedure else False),
+                cabimentacao_ref=request.form.get("cabimentacao_ref") or (procedure.cabimentacao_ref if procedure else None),
                 tribunal_review_required=bool(request.form.get("tribunal_review_required")), tribunal_review_status=request.form.get("tribunal_review_status","Não aplicável"),
                 guarantee_required=bool(request.form.get("guarantee_required")), guarantee_value=num(request.form.get("guarantee_value")),
                 advance_percent=num(request.form.get("advance_percent")), amendments_percent=num(request.form.get("amendments_percent")),
                 status=request.form.get("status","Em vigor"), document_ref=request.form.get("document_ref"), notes=request.form.get("notes"))
-            db.session.add(c); db.session.commit(); run_compliance_checks(); flash("Contrato registado e submetido ao motor de conformidade.")
-        except Exception as e: db.session.rollback(); flash("Erro no contrato: "+str(e))
-    return render_template("contracts.html", rows=Contract.query.order_by(Contract.end_date).all(), suppliers=suppliers_list, procedures=procedures)
+            db.session.add(c); db.session.commit(); run_compliance_checks()
+            flash("Contrato registado e submetido ao motor de conformidade.")
+        except Exception as e:
+            db.session.rollback(); flash("Erro no contrato: "+str(e))
+    contract_rows=[]
+    for c in Contract.query.order_by(Contract.end_date).all():
+        invoiced = money(db.session.query(func.coalesce(func.sum(SupplierInvoice.total),0)).filter(SupplierInvoice.contract_id==c.id).scalar())
+        paid = money(db.session.query(func.coalesce(func.sum(SupplierPayment.amount),0)).filter(SupplierPayment.contract_id==c.id).scalar())
+        balance = money(c.current_value) - invoiced
+        execution = (invoiced / money(c.current_value) * 100) if money(c.current_value) else 0
+        contract_rows.append({"obj":c,"invoiced":invoiced,"paid":paid,"balance":balance,"execution":execution})
+    return render_template("contracts.html", rows=contract_rows, suppliers=suppliers_list, procedures=procedures)
 
 @app.route("/procurement", methods=["GET", "POST"])
 @login_required
@@ -1219,12 +1354,30 @@ def settings():
                 try: rule.value=Decimal(request.form[rule.parameter])
                 except InvalidOperation: pass
         db.session.commit(); flash("Parâmetros legais atualizados.")
-    return render_template("settings.html", rules=LegalRule.query.order_by(LegalRule.id).all(), documents=LegalDocument.query.order_by(LegalDocument.id).all())
+    return render_template("settings.html", rules=LegalRule.query.order_by(LegalRule.id).all(), documents=LegalDocument.query.order_by(LegalDocument.id).all(), versions=LegalVersion.query.order_by(LegalVersion.effective_from.desc()).all(), checks=LegalUpdateCheck.query.order_by(LegalUpdateCheck.checked_at.desc()).all())
+
+@app.route("/legal/check", methods=["POST"])
+@login_required
+@admin_required
+def legal_check():
+    results = check_legal_updates()
+    changed = sum(1 for _, status in results if "Alteração" in status)
+    errors = sum(1 for _, status in results if "Erro" in status)
+    if changed:
+        flash(f"Verificação concluída: {changed} fonte(s) com alteração detectada. A validação humana é necessária antes de alterar regras.")
+    elif errors:
+        flash(f"Verificação concluída com {errors} erro(s) de acesso às fontes.")
+    else:
+        flash("Verificação concluída: não foram detectadas alterações nas fontes configuradas.")
+    return redirect(url_for("legal_library"))
 
 @app.route("/legal")
 @login_required
 def legal_library():
-    return render_template("legal.html", documents=LegalDocument.query.order_by(LegalDocument.id).all(), rules=LegalRule.query.filter_by(active=True).order_by(LegalRule.id).all())
+    documents=LegalDocument.query.order_by(LegalDocument.id).all()
+    rules=LegalRule.query.filter_by(active=True).order_by(LegalRule.id).all()
+    checks=LegalUpdateCheck.query.order_by(LegalUpdateCheck.checked_at.desc()).all()
+    return render_template("legal.html", documents=documents, rules=rules, checks=checks)
 
 # -----------------------------------------------------------------------------
 # Administrator-only data maintenance (edit/delete across the application)
@@ -1232,7 +1385,7 @@ def legal_library():
 ADMIN_MODELS = {
     "supplier": Supplier, "supplier_invoice": SupplierInvoice, "supplier_payment": SupplierPayment,
     "contract": Contract, "procedure": ProcurementProcedure, "client": Client, "invoice": Invoice,
-    "payment": Payment, "user": User, "legal_rule": LegalRule, "legal_document": LegalDocument,
+    "payment": Payment, "user": User, "legal_rule": LegalRule, "legal_document": LegalDocument, "legal_version": LegalVersion, "legal_update_check": LegalUpdateCheck,
     "alert": ComplianceAlert, "payment_order": PaymentOrder, "source_document": SourceDocument,
 }
 # Fields that are generated/system-only or intentionally removed from the supplier UI.
@@ -1272,7 +1425,7 @@ def admin_field_specs(model):
 @login_required
 @admin_required
 def admin_data():
-    labels={"supplier":"Fornecedores","supplier_invoice":"Faturas de fornecedores","supplier_payment":"Pagamentos de fornecedores","contract":"Contratos","procedure":"Contratação pública","client":"Clientes","invoice":"Faturas legadas","payment":"Pagamentos legados","user":"Utilizadores","legal_rule":"Regras legais","legal_document":"Documentos legais","alert":"Alertas", "payment_order":"Ordens de Saque", "source_document":"Documentos Fonte"}
+    labels={"supplier":"Fornecedores","supplier_invoice":"Faturas de fornecedores","supplier_payment":"Pagamentos de fornecedores","contract":"Contratos","procedure":"Contratação pública","client":"Clientes","invoice":"Faturas legadas","payment":"Pagamentos legados","user":"Utilizadores","legal_rule":"Regras legais","legal_document":"Documentos legais","alert":"Alertas", "payment_order":"Ordens de Saque", "source_document":"Documentos Fonte", "legal_version":"Versões legais", "legal_update_check":"Verificações legais"}
     datasets=[(k, ADMIN_MODELS[k], ADMIN_MODELS[k].query.order_by(ADMIN_MODELS[k].id.desc()).limit(100).all()) for k in ADMIN_MODELS]
     return render_template("admin_data.html", datasets=datasets, labels=labels)
 
@@ -1437,6 +1590,7 @@ def init_db():
             db.session.add(User(name="Administrador",username="admin",password_hash=generate_password_hash("admin123"),role="admin"))
             db.session.commit()
         seed_legal_data()
+        seed_legal_versions()
         # Make sure legacy installations that had no new tables are initialized.
         run_compliance_checks()
 
