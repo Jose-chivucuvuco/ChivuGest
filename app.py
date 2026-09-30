@@ -1388,6 +1388,15 @@ def procurement():
             )
             if not valid_components:
                 raise ValueError(components_message)
+            legal_basis = request.form.get("legal_basis") or ""
+            legal_basis_other = request.form.get("legal_basis_other") or ""
+            justification = (request.form.get("justification") or "").strip()
+            if legal_basis == "OUTRO":
+                if not legal_basis_other.strip():
+                    raise ValueError("Indique o outro fundamento legal.")
+                legal_basis = legal_basis_other.strip()
+            if request.form.get("procedure_type") in ("Contratação Simplificada", "Contratação Emergencial") and not justification:
+                raise ValueError("A fundamentação do procedimento é obrigatória para Contratação Simplificada e Contratação Emergencial.")
             p=ProcurementProcedure(code=request.form["code"], object=request.form["object"], contract_category=contract_category,
                 procedure_type=request.form["procedure_type"], estimated_value=estimated_value, budget_year=int(request.form.get("budget_year") or date.today().year),
                 budgeted=bool(request.form.get("budgeted")), cabimentado=bool(request.form.get("cabimentado")), cabimentacao_ref=request.form.get("cabimentacao_ref"),
@@ -1396,7 +1405,7 @@ def procurement():
                 services_description=request.form.get("services_description"), services_value=services_value,
                 decision_date=parse_date(request.form.get("decision_date"), None), invitation_date=parse_date(request.form.get("invitation_date"), None),
                 proposal_deadline=parse_date(request.form.get("proposal_deadline"), None), adjudication_date=parse_date(request.form.get("adjudication_date"), None),
-                portal_registered=bool(request.form.get("portal_registered")), legal_basis=request.form.get("legal_basis"), justification=request.form.get("justification"),
+                portal_registered=bool(request.form.get("portal_registered")), legal_basis=legal_basis, justification=justification,
                 status=request.form.get("status","Em preparação"), supplier_id=int(request.form["supplier_id"]) if request.form.get("supplier_id") else None, created_by=session["uid"])
             db.session.add(p); db.session.commit(); run_compliance_checks(); flash("Procedimento registado e analisado.")
         except Exception as e: db.session.rollback(); flash("Erro no procedimento: "+str(e))

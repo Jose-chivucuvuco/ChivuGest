@@ -36,8 +36,33 @@
   <select name="status"><option>Em preparação</option><option>Em análise</option><option>Adjudicado</option><option>Contratado</option><option>Concluído</option><option>Anulado</option></select>
 
   <div class="section-title">4. Conformidade e fundamentação</div>
-  <input name="legal_basis" placeholder="Fundamento legal / critério material">
-  <textarea name="justification" placeholder="Fundamentação do procedimento, sobretudo nos procedimentos excepcionais"></textarea>
+  <div class="legal-note" id="legalGuidance" style="grid-column:1/-1;">
+    <b>Como preencher:</b> indique a norma que sustenta a escolha do procedimento. Nos procedimentos escolhidos em função do valor, registe a base legal correspondente; nos procedimentos excepcionais, seleccione o critério material ou emergencial aplicável e descreva os factos concretos que o justificam.
+  </div>
+  <label style="grid-column:span 2;">Fundamento legal / critério aplicável *
+    <select name="legal_basis" id="legal_basis" required>
+      <option value="">Seleccione conforme o procedimento...</option>
+      <option value="Lei n.º 41/20, Art. 22.º, n.º 1, alínea a), e Art. 24.º — Concurso Público / escolha em função do valor">Concurso Público — Art. 22.º e Art. 24.º (valor)</option>
+      <option value="Lei n.º 41/20, Art. 22.º, n.º 1, alínea b), e Art. 24.º — Concurso Limitado por Prévia Qualificação / escolha em função do valor">Concurso Limitado por Prévia Qualificação — Art. 22.º e Art. 24.º (valor)</option>
+      <option value="Lei n.º 41/20, Art. 22.º, n.º 1, alínea c), e Art. 24.º, n.º 2 — Concurso Limitado por Convite / escolha em função do valor">Concurso Limitado por Convite — Art. 22.º e Art. 24.º, n.º 2 (valor)</option>
+      <option value="Lei n.º 41/20, Art. 24.º, n.º 3 — Contratação Simplificada por valor">Contratação Simplificada — Art. 24.º, n.º 3 (valor)</option>
+      <option value="Lei n.º 41/20, Art. 27.º — Contratação Simplificada por critério material">Contratação Simplificada — Art. 27.º (critério material)</option>
+      <option value="Lei n.º 41/20, Art. 28.º — Contratação Simplificada por critério material">Contratação Simplificada — Art. 28.º (critério material)</option>
+      <option value="Lei n.º 41/20, Art. 29.º — Contratação Simplificada para aquisição de serviços">Contratação Simplificada — Art. 29.º (serviços)</option>
+      <option value="Lei n.º 41/20, Art. 30.º — Contratação Simplificada por critério material">Contratação Simplificada — Art. 30.º (critério material)</option>
+      <option value="Lei n.º 41/20, Art. 31.º — Procedimento de Contratação Emergencial">Contratação Emergencial — Art. 31.º</option>
+      <option value="Lei n.º 41/20, Art. 22.º, n.º 1, alínea e), e Art. 150.º — Procedimento Dinâmico Electrónico">Procedimento Dinâmico Electrónico — Art. 22.º e Art. 150.º</option>
+      <option value="Lei n.º 41/20, Arts. 168.º e seguintes — Acordo-Quadro, conforme aplicável">Acordo-Quadro — Arts. 168.º e seguintes</option>
+      <option value="OUTRO">Outro fundamento legal (indicar abaixo)</option>
+    </select>
+  </label>
+  <label style="grid-column:span 1;">Outro fundamento legal (se aplicável)
+    <input name="legal_basis_other" id="legal_basis_other" placeholder="Diploma, artigo, número e alínea" disabled>
+  </label>
+  <label style="grid-column:1/-1;">Justificação / fundamentação do procedimento *
+    <textarea name="justification" id="justification" placeholder="Descreva os factos concretos que justificam a escolha do procedimento. Em procedimentos excepcionais, indique a situação, necessidade, circunstâncias e elementos que comprovam o critério legal invocado."></textarea>
+  </label>
+  <div class="legal-note" id="procedureExample" style="grid-column:1/-1;"></div>
   <label class="check"><input type="checkbox" name="budgeted"> Verba inscrita no orçamento</label>
   <label class="check"><input type="checkbox" name="cabimentado"> Cabimentação confirmada</label>
   <label class="check"><input type="checkbox" name="portal_registered"> Registo no Portal confirmado</label>
@@ -83,7 +108,55 @@
   [nature,estimated,goods,services].forEach(e=>{if(e)e.addEventListener('input',reconcile);});
   if(nature)nature.addEventListener('change',toggle);
   if(form)form.addEventListener('submit',function(e){if(!reconcile() && nature.value==='Bens e Serviços'){e.preventDefault(); alert('Corrija os valores de Bens e Serviços antes de guardar o procedimento.');}});
-  toggle();
+  const procedure=document.querySelector('[name="procedure_type"]');
+  const legal=document.getElementById('legal_basis');
+  const other=document.getElementById('legal_basis_other');
+  const guidance=document.getElementById('legalGuidance');
+  const example=document.getElementById('procedureExample');
+  function legalOptions(){
+    if(!procedure || !legal) return;
+    const p=procedure.value;
+    const values=[...legal.options];
+    values.forEach(o=>o.hidden=false);
+    const allow={
+      'Concurso Público':['CP'],
+      'Concurso Limitado por Prévia Qualificação':['CLPQ'],
+      'Concurso Limitado por Convite':['CLC'],
+      'Contratação Simplificada':['CSVAL','CS27','CS28','CS29','CS30'],
+      'Contratação Emergencial':['EMERG'],
+      'Procedimento Dinâmico Electrónico':['PDE'],
+      'Outro / Regime especial':[]
+    };
+    // Match by stable position/value text, keeping the selected legal wording stored in the database.
+    const keep = p==='Concurso Público' ? [1] : p==='Concurso Limitado por Prévia Qualificação' ? [2] : p==='Concurso Limitado por Convite' ? [3] : p==='Contratação Simplificada' ? [4,5,6,7,8] : p==='Contratação Emergencial' ? [9] : p==='Procedimento Dinâmico Electrónico' ? [10] : p==='Outro / Regime especial' ? [12] : [1,2,3,4,5,6,7,8,9,10,11];
+    values.forEach((o,i)=>{ if(i>0 && i!==12 && !keep.includes(i)) o.hidden=true; });
+    const selectedIndex=values.findIndex(o=>o.value===legal.value);
+    if(selectedIndex>0 && !keep.includes(selectedIndex) && legal.value!=='OUTRO'){ legal.value=''; }
+    if(p==='Contratação Simplificada') {
+      guidance.innerHTML='<b>Contratação Simplificada:</b> seleccione o fundamento por valor (Art. 24.º, n.º 3) ou o critério material específico (Arts. 27.º–30.º). Se for critério material, a justificação deve explicar os factos que enquadram o caso.';
+      example.innerHTML='<b>Exemplo:</b> “Contratação Simplificada — Art. 27.º, alínea a). O objecto só pode ser executado por fornecedor único por motivo de aptidão técnica/direitos exclusivos, conforme documentação anexa.”';
+    } else if(p==='Contratação Emergencial') {
+      guidance.innerHTML='<b>Contratação Emergencial:</b> seleccione o Art. 31.º e descreva a emergência concreta, a sua imprevisibilidade e por que os prazos/formalidades do procedimento normal não podem ser cumpridos.';
+      example.innerHTML='<b>Exemplo:</b> “Ocorrência imprevista exige intervenção imediata para evitar interrupção de serviço essencial, não sendo possível cumprir os prazos do procedimento normal.”';
+    } else if(p==='Concurso Limitado por Convite') {
+      guidance.innerHTML='<b>Concurso Limitado por Convite:</b> a fundamentação deve indicar a escolha em função do valor estimado e os elementos usados para determinar esse valor.';
+      example.innerHTML='<b>Exemplo:</b> “Procedimento escolhido em função do valor estimado do contrato, calculado segundo critérios objectivos e preços de referência de mercado.”';
+    } else {
+      guidance.innerHTML='<b>Fundamento legal:</b> indique a norma que sustenta a escolha do procedimento. A justificação deve explicar, de forma factual, como o caso concreto se enquadra nessa norma.';
+      example.innerHTML='';
+    }
+    toggleOther();
+  }
+  function toggleOther(){
+    if(!other || !legal) return;
+    const on=legal.value==='OUTRO';
+    other.disabled=!on;
+    other.required=on;
+    if(!on) other.value='';
+  }
+  if(procedure) procedure.addEventListener('change',legalOptions);
+  if(legal) legal.addEventListener('change',toggleOther);
+  legalOptions();
 })();
 </script>
 {% endblock %}
