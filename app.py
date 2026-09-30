@@ -1001,28 +1001,107 @@ def logout():
 @app.route("/")
 @login_required
 def dashboard():
+    """Dashboard executivo baseado exclusivamente nos dados já existentes no ChivuGest."""
+    today = date.today()
+
     total_invoices = db.session.query(func.coalesce(func.sum(SupplierInvoice.total), 0)).scalar() or 0
     total_paid = db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).scalar() or 0
-    payable = float(total_invoices) - float(total_paid)
+    payable = max(float(total_invoices) - float(total_paid), 0)
     overdue = db.session.query(func.coalesce(func.sum(SupplierInvoice.total - SupplierInvoice.paid), 0)).filter(
-        SupplierInvoice.due_date < date.today(), SupplierInvoice.total > SupplierInvoice.paid).scalar() or 0
+        SupplierInvoice.due_date < today, SupplierInvoice.total > SupplierInvoice.paid).scalar() or 0
+
+    invoice_count = SupplierInvoice.query.count()
+    paid_invoice_count = SupplierInvoice.query.filter_by(status="Paga").count()
+    partial_invoice_count = SupplierInvoice.query.filter_by(status="Parcial").count()
+    pending_invoice_count = SupplierInvoice.query.filter(
+        SupplierInvoice.total > SupplierInvoice.paid
+    ).count()
+
+    payment_count = SupplierPayment.query.count()
+    payment_order_count = PaymentOrder.query.count()
+    pending_orders = PaymentOrder.query.filter(
+        PaymentOrder.status.ilike("%pendente%")
+    ).count()
+    pending_order_value = db.session.query(
+        func.coalesce(func.sum(PaymentOrder.amount), 0)
+    ).filter(PaymentOrder.status.ilike("%pendente%" )).scalar() or 0
+
     contracts_active = Contract.query.filter_by(status="Em vigor").count()
-    expiring = Contract.query.filter(Contract.status == "Em vigor", Contract.end_date <= date.today()+timedelta(days=60), Contract.end_date >= date.today()).count()
+    expiring = Contract.query.filter(
+        Contract.status == "Em vigor",
+        Contract.end_date <= today + timedelta(days=60),
+        Contract.end_date >= today
+    ).count()
+    expired_contracts = Contract.query.filter(
+        Contract.end_date < today, Contract.status == "Em vigor"
+    ).count()
+
     critical_alerts = ComplianceAlert.query.filter_by(resolved=False, severity="CRITICO").count()
     alert_count = ComplianceAlert.query.filter_by(resolved=False).count()
     suppliers = Supplier.query.count()
-    recent_payments = SupplierPayment.query.order_by(SupplierPayment.id.desc()).limit(8).all()
-    recent_contracts = Contract.query.order_by(Contract.end_date).limit(6).all()
-    monthly = db.session.query(func.extract("year", SupplierPayment.date).label("y"), func.extract("month", SupplierPayment.date).label("m"), func.sum(SupplierPayment.amount).label("v")).group_by("y","m").order_by("y","m").all()
-    months = [{"label": f"{int(r.y):04d}-{int(r.m):02d}", "value": float(r.v or 0)} for r in monthly]
-    maxv = max([m["value"] for m in months], default=0)
-    for m in months: m["height"] = 20 + (m["value"]/(maxv or 1))*180
+
+    # Série mensal: facturação vs pagamentos, sem inventar uma dotação orçamental.
+    invoice_monthly = db.session.query(
+        func.extract("year", SupplierInvoice.issue_date).label("y"),
+        func.extract("month", SupplierInvoice.issue_date).label("m"),
+        func.sum(SupplierInvoice.total).label("v")
+    ).group_by("y", "m").order_by("y", "m").all()
+
+    payment_monthly = db.session.query(
+        func.extract("year", SupplierPayment.date).label("y"),
+        func.extract("month", SupplierPayment.date).label("m"),
+        func.sum(SupplierPayment.amount).label("v")
+    ).group_by("y", "m").order_by("y", "m").all()
+
+    month_map = {}
+    for r in invoice_monthly:
+        key=(int(r.y), int(r.m))
+        month_map.setdefault(key, {})["invoices"] = float(r.v or 0)
+    for r in payment_monthly:
+        key=(int(r.y), int(r.m))
+        month_map.setdefault(key, {})["payments"] = float(r.v or 0)
+
+    keys=sorted(month_map.keys())[-12:]
+    max_flow=max([max(month_map[k].get("invoices",0), month_map[k].get("payments",0)) for k in keys], default=0)
+    month_labels=["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]
+    months=[]
+    for y,m in keys:
+        invv=month_map[(y,m)].get("invoices",0)
+        payv=month_map[(y,m)].get("payments",0)
+        months.append({
+            "label": month_labels[m-1], "year": y, "invoices": invv, "payments": payv,
+            "invoice_height": 18 + (invv/(max_flow or 1))*150,
+            "payment_height": 18 + (payv/(max_flow or 1))*150
+        })
+
+    recent_invoices = SupplierInvoice.query.order_by(SupplierInvoice.id.desc()).limit(6).all()
+    recent_payments = SupplierPayment.query.order_by(SupplierPayment.id.desc()).limit(6).all()
+    recent_orders = PaymentOrder.query.order_by(PaymentOrder.id.desc()).limit(6).all()
+    recent_contracts = Contract.query.filter(Contract.status == "Em vigor", Contract.end_date >= today).order_by(Contract.end_date).limit(6).all()
+
+    # Saldo por fornecedor, usando facturas menos pagamentos associados ao fornecedor.
+    supplier_balances=[]
+    for s in Supplier.query.order_by(Supplier.name).all():
+        inv_total=db.session.query(func.coalesce(func.sum(SupplierInvoice.total),0)).filter(SupplierInvoice.supplier_id==s.id).scalar() or 0
+        paid_total=db.session.query(func.coalesce(func.sum(SupplierPayment.amount),0)).filter(SupplierPayment.supplier_id==s.id).scalar() or 0
+        balance=float(inv_total)-float(paid_total)
+        if balance > 0:
+            supplier_balances.append({"name":s.name,"balance":balance})
+    supplier_balances=sorted(supplier_balances,key=lambda x:x["balance"],reverse=True)[:5]
+
     run_compliance_checks()
     latest_backup = BackupRecord.query.order_by(BackupRecord.created_at.desc()).first()
-    return render_template("dashboard.html", total_invoices=total_invoices, total_paid=total_paid, payable=payable,
-                           overdue=overdue, contracts_active=contracts_active, expiring=expiring,
-                           critical_alerts=critical_alerts, alert_count=alert_count, suppliers=suppliers,
-                           recent_payments=recent_payments, recent_contracts=recent_contracts, months=months, latest_backup=latest_backup)
+    return render_template(
+        "dashboard.html", total_invoices=total_invoices, total_paid=total_paid, payable=payable,
+        overdue=overdue, contracts_active=contracts_active, expiring=expiring,
+        expired_contracts=expired_contracts, critical_alerts=critical_alerts, alert_count=alert_count,
+        suppliers=suppliers, invoice_count=invoice_count, paid_invoice_count=paid_invoice_count,
+        partial_invoice_count=partial_invoice_count, pending_invoice_count=pending_invoice_count,
+        payment_count=payment_count, payment_order_count=payment_order_count, pending_orders=pending_orders,
+        pending_order_value=pending_order_value, recent_payments=recent_payments, recent_orders=recent_orders,
+        recent_invoices=recent_invoices, recent_contracts=recent_contracts, months=months, today=today.isoformat(),
+        supplier_balances=supplier_balances, latest_backup=latest_backup
+    )
 
 # -----------------------------------------------------------------------------
 # Suppliers

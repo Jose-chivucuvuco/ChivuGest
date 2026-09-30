@@ -1,5 +1,49 @@
-{% extends "base.html" %}{% block content %}<div class="pagehead"><div><h1>Dashboard</h1><p class="muted">Visão executiva financeira, contratual e de conformidade.</p></div><div class="actions"><a class="btn secondary" href="/import">Importar fatura</a><a class="btn" href="/contracts">Novo contrato</a></div></div>
-<section class="cards six"><div class="metric"><small>FORNECEDORES</small><strong>{{suppliers}}</strong><span>cadastros</span></div><div class="metric"><small>FATURAS</small><strong>Kz {{"{:,.2f}".format(total_invoices)}}</strong><span>total lançado</span></div><div class="metric"><small>PAGO</small><strong>Kz {{"{:,.2f}".format(total_paid)}}</strong><span>pagamentos</span></div><div class="metric"><small>A PAGAR</small><strong>Kz {{"{:,.2f}".format(payable)}}</strong><span>saldo</span></div><div class="metric warning"><small>CONTRATOS A VENCER</small><strong>{{expiring}}</strong><span>próximos 60 dias</span></div><div class="metric danger"><small>ALERTAS CRÍTICOS</small><strong>{{critical_alerts}}</strong><span>{{alert_count}} alertas abertos</span></div></section>
-<section class="dashboard-grid"><div class="panel"><div class="panelhead"><h2>Pagamentos mensais</h2><span class="badge blue">Fluxo</span></div><div class="bars">{% for m in months %}<div class="barwrap"><div class="bar" style="height:{{'%.1f'|format(m.height)}}px"></div><small>{{m.label}}</small></div>{% else %}<p class="muted">Ainda não existem pagamentos para apresentar.</p>{% endfor %}</div></div>
-<div class="panel"><div class="panelhead"><h2>Gestão de contratos</h2><a href="/contracts">Ver todos</a></div><div class="mini-stat"><b>{{contracts_active}}</b><span>Contratos em vigor</span></div><div class="mini-stat warning"><b>{{expiring}}</b><span>Por regularizar / vencem em 60 dias</span></div><div class="mini-stat danger"><b>{{critical_alerts}}</b><span>Alertas críticos</span></div></div></section>
-<section class="dashboard-grid"><div class="panel"><div class="panelhead"><h2>Contratos próximos do vencimento</h2><a href="/alerts">Alertas</a></div><table><tr><th>Contrato</th><th>Fornecedor</th><th>Fim</th><th>Valor</th></tr>{% for c in recent_contracts %}<tr><td>{{c.number}}</td><td>{{c.supplier.name}}</td><td>{{c.end_date}}</td><td>Kz {{"{:,.2f}".format(c.current_value or 0)}}</td></tr>{% else %}<tr><td colspan="4" class="muted">Sem contratos.</td></tr>{% endfor %}</table></div><div class="panel"><div class="panelhead"><h2>Últimos pagamentos</h2><a href="/payments">Ver todos</a></div><table><tr><th>Data</th><th>Fornecedor</th><th>Valor</th></tr>{% for p in recent_payments %}<tr><td>{{p.date}}</td><td>{{p.supplier.name}}</td><td>Kz {{"{:,.2f}".format(p.amount or 0)}}</td></tr>{% else %}<tr><td colspan="3" class="muted">Sem pagamentos.</td></tr>{% endfor %}</table></div></section>{% if session.role=='admin' %}<section class="dashboard-grid"><div class="panel"><div class="panelhead"><h2>Segurança dos dados</h2><a href="/admin/backup">Backup</a></div><p><b>Último backup:</b> {% if latest_backup %}{{latest_backup.created_at.strftime('%d/%m/%Y %H:%M')}} — {{latest_backup.code}}{% else %}Nenhum backup criado ainda.{% endif %}</p><a class="btn secondary" href="/admin/backup">Abrir Backup e Recuperação</a></div></section>{% endif %}{% endblock %}
+{% extends "base.html" %}
+{% block content %}
+<div class="pagehead dashboard-head">
+  <div><h1>Dashboard</h1><p class="muted">Visão geral da gestão financeira, fornecedores, contratos e conformidade.</p></div>
+  <div class="dashboard-tools"><div class="period-tabs"><span class="active">Diária</span><span>Mensal</span><span>Trimestral</span><span>Anual</span></div><label class="datebox">Período <input type="date" value="{{ today if today else '' }}"></label></div>
+</div>
+
+<section class="cards dashboard-kpis">
+  <div class="metric kpi-blue"><div class="kpi-icon">▤</div><div><small>FACTURAS REGISTADAS</small><strong>{{invoice_count}}</strong><span>Kz {{"{:,.2f}".format(total_invoices)}}</span></div></div>
+  <div class="metric kpi-green"><div class="kpi-icon">▣</div><div><small>PAGAMENTOS EXECUTADOS</small><strong>Kz {{"{:,.2f}".format(total_paid)}}</strong><span>{{payment_count}} pagamentos</span></div></div>
+  <div class="metric kpi-amber"><div class="kpi-icon">◷</div><div><small>SALDO A PAGAR</small><strong>Kz {{"{:,.2f}".format(payable)}}</strong><span>{{pending_invoice_count}} facturas em aberto</span></div></div>
+  <div class="metric kpi-purple"><div class="kpi-icon">▧</div><div><small>CONTRATOS EM VIGOR</small><strong>{{contracts_active}}</strong><span>{{expiring}} próximos do vencimento</span></div></div>
+</section>
+
+<section class="dashboard-grid dashboard-main-grid">
+  <div class="panel flow-panel">
+    <div class="panelhead"><div><h2>Fluxo financeiro</h2><p class="muted tiny">Facturação × pagamentos registados</p></div><span class="badge blue">Dados reais</span></div>
+    {% if months %}<div class="legend"><span><i class="dot blue-dot"></i> Facturas</span><span><i class="dot green-dot"></i> Pagamentos</span></div><div class="dual-bars">{% for m in months %}<div class="dual-barwrap"><div class="bars-pair"><div class="bar invoice-bar" style="height:{{m.invoice_height}}px" title="Facturas: Kz {{'{:,.2f}'.format(m.invoices)}}"></div><div class="bar payment-bar" style="height:{{m.payment_height}}px" title="Pagamentos: Kz {{'{:,.2f}'.format(m.payments)}}"></div></div><small>{{m.label}}</small></div>{% endfor %}</div>{% else %}<div class="empty">Ainda não existem movimentos financeiros suficientes para apresentar o gráfico.</div>{% endif %}
+  </div>
+  <div class="panel cycle-panel">
+    <div class="panelhead"><h2>Ciclo financeiro</h2><a href="/payments">Ver detalhes</a></div>
+    <div class="cycle-row"><span class="cycle-icon blue-bg">▤</span><div><b>Facturas</b><small>{{invoice_count}} registadas</small></div><strong>Kz {{"{:,.2f}".format(total_invoices)}}</strong></div>
+    <div class="cycle-arrow">↓</div>
+    <div class="cycle-row"><span class="cycle-icon green-bg">✓</span><div><b>Liquidadas/Pagas</b><small>{{paid_invoice_count}} pagas · {{partial_invoice_count}} parciais</small></div><strong>Kz {{"{:,.2f}".format(total_paid)}}</strong></div>
+    <div class="cycle-arrow">↓</div>
+    <div class="cycle-row"><span class="cycle-icon amber-bg">▣</span><div><b>Ordens de Saque</b><small>{{payment_order_count}} importadas</small></div><strong>{{pending_orders}} pendentes</strong></div>
+    <div class="cycle-arrow">↓</div>
+    <div class="cycle-row"><span class="cycle-icon purple-bg">₭</span><div><b>Saldo em aberto</b><small>Após pagamentos</small></div><strong>Kz {{"{:,.2f}".format(payable)}}</strong></div>
+  </div>
+</section>
+
+<section class="panel alerts-panel">
+  <div class="panelhead"><h2>Alertas de gestão</h2><span class="alert-counter">{{alert_count + expiring + pending_orders + expired_contracts}}</span></div>
+  <div class="alert-grid">
+    <a class="dash-alert danger" href="/invoices"><span class="alert-icon">!</span><div><b>Facturas em atraso</b><strong>Kz {{"{:,.2f}".format(overdue)}}</strong><small>Valores vencidos e não pagos</small></div><span>›</span></a>
+    <a class="dash-alert warning" href="/contracts"><span class="alert-icon">◷</span><div><b>Contratos próximos do vencimento</b><strong>{{expiring}}</strong><small>Nos próximos 60 dias</small></div><span>›</span></a>
+    <a class="dash-alert danger" href="/payments"><span class="alert-icon">▣</span><div><b>Ordens de Saque pendentes</b><strong>{{pending_orders}}</strong><small>Kz {{"{:,.2f}".format(pending_order_value)}}</small></div><span>›</span></a>
+    <a class="dash-alert info" href="/alerts"><span class="alert-icon">◉</span><div><b>Alertas de conformidade</b><strong>{{critical_alerts}}</strong><small>{{alert_count}} alertas abertos</small></div><span>›</span></a>
+  </div>
+</section>
+
+<section class="dashboard-grid bottom-grid">
+  <div class="panel"><div class="panelhead"><h2>Últimas facturas</h2><a href="/invoices">Ver todas</a></div><div class="table-scroll"><table><tr><th>Nº Factura</th><th>Fornecedor</th><th>Data</th><th>Valor</th><th>Estado</th></tr>{% for i in recent_invoices %}<tr><td><b>{{i.number}}</b></td><td>{{i.supplier.name}}</td><td>{{i.issue_date}}</td><td>Kz {{"{:,.2f}".format(i.total or 0)}}</td><td>{% if i.status=='Paga' %}<span class="badge green">Paga</span>{% elif i.status=='Parcial' %}<span class="badge amber">Parcial</span>{% else %}<span class="badge">Pendente</span>{% endif %}</td></tr>{% else %}<tr><td colspan="5" class="empty">Sem facturas.</td></tr>{% endfor %}</table></div></div>
+  <div class="panel"><div class="panelhead"><h2>Pagamentos recentes</h2><a href="/payments">Ver todos</a></div><div class="table-scroll"><table><tr><th>Data</th><th>Fornecedor</th><th>Valor</th><th>Referência</th></tr>{% for p in recent_payments %}<tr><td>{{p.date}}</td><td>{{p.supplier.name}}</td><td>Kz {{"{:,.2f}".format(p.amount or 0)}}</td><td>{{p.reference or p.receipt}}</td></tr>{% else %}<tr><td colspan="4" class="empty">Sem pagamentos.</td></tr>{% endfor %}</table></div></div>
+  <div class="panel"><div class="panelhead"><h2>Fornecedores — saldo em aberto</h2><a href="/current">Ver conta corrente</a></div><div class="table-scroll"><table><tr><th>Fornecedor</th><th>Saldo</th></tr>{% for s in supplier_balances %}<tr><td>{{s.name}}</td><td><b>Kz {{"{:,.2f}".format(s.balance)}}</b></td></tr>{% else %}<tr><td colspan="2" class="empty">Sem saldos em aberto.</td></tr>{% endfor %}</table></div></div>
+</section>
+
+{% if session.role=='admin' %}<section class="panel admin-strip"><div><h2>Segurança dos dados</h2><p class="muted">{% if latest_backup %}Último backup: {{latest_backup.created_at.strftime('%d/%m/%Y %H:%M')}} — {{latest_backup.code}}{% else %}Nenhum backup criado ainda.{% endif %}</p></div><a class="btn secondary" href="/admin/backup">Backup e Recuperação</a></section>{% endif %}
+{% endblock %}
