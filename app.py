@@ -405,6 +405,27 @@ def num(v):
     except (ValueError, TypeError): return 0.0
 
 
+def validate_mixed_components(category, reference_value, goods_value, services_value):
+    """Valida a composição de contratações mistas contra o valor de referência."""
+    if category != "Bens e Serviços":
+        return True, ""
+    reference = round(num(reference_value), 2)
+    goods = round(num(goods_value), 2)
+    services = round(num(services_value), 2)
+    total = round(goods + services, 2)
+    difference = round(reference - total, 2)
+    if abs(difference) > 0.01:
+        direction = "em falta" if difference > 0 else "acima"
+        return False, (
+            f"A composição de Bens e Serviços não corresponde ao valor de referência. "
+            f"Bens: Kz {goods:,.2f}; Serviços: Kz {services:,.2f}; "
+            f"Total dos componentes: Kz {total:,.2f}; "
+            f"Valor de referência: Kz {reference:,.2f}; "
+            f"Diferença: Kz {abs(difference):,.2f} ({direction})."
+        )
+    return True, ""
+
+
 def normalize_key(k):
     if k is None: return ""
     s = unicodedata.normalize("NFKD", str(k)).encode("ascii", "ignore").decode().lower().strip()
@@ -1320,6 +1341,11 @@ def contracts():
             end_date=parse_date(request.form["end_date"])
             original=num(request.form["original_value"])
             current=num(request.form.get("current_value") or original)
+            valid_components, components_message = validate_mixed_components(
+                contract_type, original, goods_value, services_value
+            )
+            if not valid_components:
+                raise ValueError(components_message)
             c=Contract(number=request.form["number"], supplier_id=supplier_id,
                 procedure_id=procedure.id if procedure else None,
                 object=object_value, contract_type=contract_type, procedure_type=procedure_type,
@@ -1353,12 +1379,21 @@ def procurement():
     suppliers_list=Supplier.query.order_by(Supplier.name).all()
     if request.method == "POST":
         try:
-            p=ProcurementProcedure(code=request.form["code"], object=request.form["object"], contract_category=request.form["contract_category"],
-                procedure_type=request.form["procedure_type"], estimated_value=num(request.form["estimated_value"]), budget_year=int(request.form.get("budget_year") or date.today().year),
+            contract_category = request.form["contract_category"]
+            estimated_value = num(request.form["estimated_value"])
+            goods_value = num(request.form.get("goods_value"))
+            services_value = num(request.form.get("services_value"))
+            valid_components, components_message = validate_mixed_components(
+                contract_category, estimated_value, goods_value, services_value
+            )
+            if not valid_components:
+                raise ValueError(components_message)
+            p=ProcurementProcedure(code=request.form["code"], object=request.form["object"], contract_category=contract_category,
+                procedure_type=request.form["procedure_type"], estimated_value=estimated_value, budget_year=int(request.form.get("budget_year") or date.today().year),
                 budgeted=bool(request.form.get("budgeted")), cabimentado=bool(request.form.get("cabimentado")), cabimentacao_ref=request.form.get("cabimentacao_ref"),
                 instrument_type=request.form.get("instrument_type") or "Contrato público",
-                goods_description=request.form.get("goods_description"), goods_value=num(request.form.get("goods_value")),
-                services_description=request.form.get("services_description"), services_value=num(request.form.get("services_value")),
+                goods_description=request.form.get("goods_description"), goods_value=goods_value,
+                services_description=request.form.get("services_description"), services_value=services_value,
                 decision_date=parse_date(request.form.get("decision_date"), None), invitation_date=parse_date(request.form.get("invitation_date"), None),
                 proposal_deadline=parse_date(request.form.get("proposal_deadline"), None), adjudication_date=parse_date(request.form.get("adjudication_date"), None),
                 portal_registered=bool(request.form.get("portal_registered")), legal_basis=request.form.get("legal_basis"), justification=request.form.get("justification"),

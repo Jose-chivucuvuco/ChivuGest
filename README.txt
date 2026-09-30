@@ -51,3 +51,8 @@ Esta versão inclui:
 - Base legal com versões, exercício, entrada em vigor, histórico de verificações e detecção de alterações nas fontes.
 - A verificação de fontes legais não interpreta automaticamente uma alteração como nova regra. Alterações detectadas ficam sujeitas a validação humana antes da alteração dos parâmetros.
 - Verificação automática opcional: AUTO_LEGAL_CHECK=true; LEGAL_CHECK_INTERVAL_HOURS=6.
+
+
+ATUALIZAÇÃO 30/09/2026
+- Validação de composição para contratações mistas (Bens e Serviços): os valores dos componentes devem coincidir com o valor de referência/valor inicial.
+- Indicador visual em tempo real e validação no servidor impedem o registo de divergências.

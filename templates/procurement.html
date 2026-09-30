@@ -16,7 +16,8 @@
 
   <div class="section-title">2. Composição do objecto</div>
   <div id="mixedComponents" style="grid-column:1/-1;display:none;">
-    <div class="legal-note"><b>Contratação mista:</b> indique separadamente os bens e os serviços incluídos. O total dos componentes deve ser compatível com o valor estimado.</div>
+    <div class="legal-note"><b>Contratação mista:</b> indique separadamente os bens e os serviços incluídos. O total dos componentes deve ser igual ao valor estimado.</div>
+    <div id="componentSummary" class="legal-note" style="margin-top:10px;"></div>
     <div class="form three" style="margin-top:10px;">
       <input name="goods_description" placeholder="Descrição dos bens">
       <input name="goods_value" type="number" step="0.01" min="0" placeholder="Valor dos bens (Kz)">
@@ -50,10 +51,39 @@
 {% else %}<tr><td colspan="8" class="empty">Nenhum procedimento registado.</td></tr>{% endfor %}</table></div>
 <script>
 (function(){
+  const form=document.getElementById('procurementForm');
   const nature=document.getElementById('contract_category');
   const mixed=document.getElementById('mixedComponents');
-  function toggle(){ mixed.style.display=(nature && nature.value==='Bens e Serviços')?'block':'none'; }
-  if(nature){nature.addEventListener('change',toggle); toggle();}
+  const estimated=document.querySelector('[name="estimated_value"]');
+  const goods=document.querySelector('[name="goods_value"]');
+  const services=document.querySelector('[name="services_value"]');
+  const summary=document.getElementById('componentSummary');
+  const submit=form ? form.querySelector('button[type="submit"], button:not([type])') : null;
+  function fmt(v){return new Intl.NumberFormat('pt-AO',{minimumFractionDigits:2,maximumFractionDigits:2}).format(v);}
+  function reconcile(){
+    if(!summary || !nature) return true;
+    if(nature.value!=='Bens e Serviços'){ summary.style.display='none'; if(submit) submit.disabled=false; return true; }
+    summary.style.display='block';
+    const ref=parseFloat(estimated && estimated.value || 0)||0;
+    const b=parseFloat(goods && goods.value || 0)||0;
+    const s=parseFloat(services && services.value || 0)||0;
+    const total=Math.round((b+s)*100)/100;
+    const diff=Math.round((ref-total)*100)/100;
+    if(Math.abs(diff)<=0.01){
+      summary.innerHTML='<b>✓ Composição válida:</b> Bens + Serviços = <b>Kz '+fmt(total)+'</b>, igual ao valor estimado.';
+      summary.style.borderColor='#b7e4c7'; summary.style.background='#f0fff4'; summary.style.color='#166534';
+      if(submit) submit.disabled=false; return true;
+    }
+    const label=diff>0?'Em falta':'Acima do valor estimado';
+    summary.innerHTML='<b>⚠ Composição incompatível:</b> Total dos componentes <b>Kz '+fmt(total)+'</b> | Valor estimado <b>Kz '+fmt(ref)+'</b> | <b>'+label+': Kz '+fmt(Math.abs(diff))+'</b>.';
+    summary.style.borderColor='#f5c2c7'; summary.style.background='#fff5f5'; summary.style.color='#b42318';
+    if(submit) submit.disabled=true; return false;
+  }
+  function toggle(){ const isMixed=nature && nature.value==='Bens e Serviços'; mixed.style.display=isMixed?'block':'none'; reconcile(); }
+  [nature,estimated,goods,services].forEach(e=>{if(e)e.addEventListener('input',reconcile);});
+  if(nature)nature.addEventListener('change',toggle);
+  if(form)form.addEventListener('submit',function(e){if(!reconcile() && nature.value==='Bens e Serviços'){e.preventDefault(); alert('Corrija os valores de Bens e Serviços antes de guardar o procedimento.');}});
+  toggle();
 })();
 </script>
 {% endblock %}
