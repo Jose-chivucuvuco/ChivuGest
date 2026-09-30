@@ -113,6 +113,11 @@ class ProcurementProcedure(db.Model):
     budgeted = db.Column(db.Boolean, default=False)
     cabimentado = db.Column(db.Boolean, default=False)
     cabimentacao_ref = db.Column(db.String(120))
+    instrument_type = db.Column(db.String(100), nullable=True, default="Contrato público")
+    goods_description = db.Column(db.Text)
+    goods_value = db.Column(db.Numeric(18,2), default=0)
+    services_description = db.Column(db.Text)
+    services_value = db.Column(db.Numeric(18,2), default=0)
     decision_date = db.Column(db.Date)
     invitation_date = db.Column(db.Date)
     proposal_deadline = db.Column(db.Date)
@@ -136,6 +141,10 @@ class Contract(db.Model):
     contract_type = db.Column(db.String(80), nullable=False)
     procedure_type = db.Column(db.String(80), nullable=False)
     instrument_type = db.Column(db.String(100), nullable=True, default="Contrato público")
+    goods_description = db.Column(db.Text)
+    goods_value = db.Column(db.Numeric(18,2), default=0)
+    services_description = db.Column(db.Text)
+    services_value = db.Column(db.Numeric(18,2), default=0)
     start_date = db.Column(db.Date, nullable=False)
     end_date = db.Column(db.Date, nullable=False)
     original_value = db.Column(db.Numeric(18,2), nullable=False, default=0)
@@ -321,7 +330,7 @@ PROCEDURES = [
     "Concurso Limitado por Convite", "Contratação Simplificada",
     "Procedimento Dinâmico Electrónico", "Contratação Emergencial"
 ]
-CONTRACT_CATEGORIES = ["Empreitada", "Bens", "Serviços", "Concessão", "Locação"]
+CONTRACT_CATEGORIES = ["Empreitada", "Bens", "Serviços", "Bens e Serviços", "Concessão", "Locação", "Outro / Regime especial"]
 CONTRACTING_TYPES = PROCEDURES + ["Outro / Regime especial"]
 
 # Instrumentos/formas contratuais relevantes para o ChivuGest.
@@ -1288,11 +1297,21 @@ def contracts():
             object_value = request.form.get("object", "").strip()
 
             # If a procedure is selected, its core data becomes the source of truth.
+            instrument_value = request.form.get("instrument_type") or "Contrato público"
+            goods_description = request.form.get("goods_description")
+            goods_value = num(request.form.get("goods_value"))
+            services_description = request.form.get("services_description")
+            services_value = num(request.form.get("services_value"))
             if procedure:
                 supplier_id = procedure.supplier_id or supplier_id
                 contract_type = procedure.contract_category or contract_type
                 procedure_type = procedure.procedure_type or procedure_type
                 object_value = procedure.object or object_value
+                instrument_value = procedure.instrument_type or instrument_value
+                goods_description = procedure.goods_description or goods_description
+                goods_value = money(procedure.goods_value) or goods_value
+                services_description = procedure.services_description or services_description
+                services_value = money(procedure.services_value) or services_value
             if not supplier_id:
                 raise ValueError("Selecione o fornecedor ou associe um procedimento com fornecedor.")
             if not object_value:
@@ -1304,7 +1323,8 @@ def contracts():
             c=Contract(number=request.form["number"], supplier_id=supplier_id,
                 procedure_id=procedure.id if procedure else None,
                 object=object_value, contract_type=contract_type, procedure_type=procedure_type,
-                instrument_type=request.form.get("instrument_type") or "Contrato público",
+                instrument_type=instrument_value, goods_description=goods_description, goods_value=goods_value,
+                services_description=services_description, services_value=services_value,
                 start_date=start_date, end_date=end_date,
                 original_value=original, current_value=current,
                 renewal_allowed=bool(request.form.get("renewal_allowed")), renewal_count=int(request.form.get("renewal_count") or 0),
@@ -1336,13 +1356,16 @@ def procurement():
             p=ProcurementProcedure(code=request.form["code"], object=request.form["object"], contract_category=request.form["contract_category"],
                 procedure_type=request.form["procedure_type"], estimated_value=num(request.form["estimated_value"]), budget_year=int(request.form.get("budget_year") or date.today().year),
                 budgeted=bool(request.form.get("budgeted")), cabimentado=bool(request.form.get("cabimentado")), cabimentacao_ref=request.form.get("cabimentacao_ref"),
+                instrument_type=request.form.get("instrument_type") or "Contrato público",
+                goods_description=request.form.get("goods_description"), goods_value=num(request.form.get("goods_value")),
+                services_description=request.form.get("services_description"), services_value=num(request.form.get("services_value")),
                 decision_date=parse_date(request.form.get("decision_date"), None), invitation_date=parse_date(request.form.get("invitation_date"), None),
                 proposal_deadline=parse_date(request.form.get("proposal_deadline"), None), adjudication_date=parse_date(request.form.get("adjudication_date"), None),
                 portal_registered=bool(request.form.get("portal_registered")), legal_basis=request.form.get("legal_basis"), justification=request.form.get("justification"),
                 status=request.form.get("status","Em preparação"), supplier_id=int(request.form["supplier_id"]) if request.form.get("supplier_id") else None, created_by=session["uid"])
             db.session.add(p); db.session.commit(); run_compliance_checks(); flash("Procedimento registado e analisado.")
         except Exception as e: db.session.rollback(); flash("Erro no procedimento: "+str(e))
-    return render_template("procurement.html", rows=ProcurementProcedure.query.order_by(ProcurementProcedure.id.desc()).all(), suppliers=suppliers_list)
+    return render_template("procurement.html", rows=ProcurementProcedure.query.order_by(ProcurementProcedure.id.desc()).all(), suppliers=suppliers_list, contract_instruments=CONTRACT_INSTRUMENTS)
 
 @app.route("/alerts")
 @login_required
@@ -1509,9 +1532,12 @@ ADMIN_FIELD_LABELS = {
 
     # Fornecedores / contratação pública
     "contracting_type": "Tipo de contratação",
-    "object": "Objecto", "contract_category": "Categoria do contrato",
-    "contract_type": "Tipo de contrato", "instrument_type": "Instrumento de contratação", "procedure_id": "Procedimento",
-    "procedure_type": "Tipo de procedimento",
+    "object": "Objecto",
+    "contract_type": "Tipo de contrato", "contract_category": "Objecto / natureza da contratação",
+    "instrument_type": "Instrumento de contratação", "procedure_id": "Procedimento",
+    "procedure_type": "Procedimento de contratação",
+    "goods_description": "Descrição dos bens", "goods_value": "Valor dos bens",
+    "services_description": "Descrição dos serviços", "services_value": "Valor dos serviços",
     "estimated_value": "Valor estimado", "budget_year": "Ano orçamental",
     "budgeted": "Orçamentado", "cabimentado": "Cabimentado",
     "cabimentacao_ref": "Referência da cabimentação",
@@ -1765,9 +1791,37 @@ def ensure_schema_updates():
     tables = inspector.get_table_names()
     if "contract" in tables:
         cols = {c["name"] for c in inspector.get_columns("contract")}
-        if "instrument_type" not in cols:
-            db.session.execute(db.text("ALTER TABLE contract ADD COLUMN instrument_type VARCHAR(100)"))
-            db.session.execute(db.text("UPDATE contract SET instrument_type = 'Contrato público' WHERE instrument_type IS NULL"))
+        additions = {
+            "instrument_type": "VARCHAR(100)",
+            "goods_description": "TEXT",
+            "goods_value": "NUMERIC(18,2)",
+            "services_description": "TEXT",
+            "services_value": "NUMERIC(18,2)",
+        }
+        changed = False
+        for name, typ in additions.items():
+            if name not in cols:
+                db.session.execute(db.text(f"ALTER TABLE contract ADD COLUMN {name} {typ}"))
+                changed = True
+        db.session.execute(db.text("UPDATE contract SET instrument_type = 'Contrato público' WHERE instrument_type IS NULL"))
+        if changed or True:
+            db.session.commit()
+    if "procurement_procedure" in tables:
+        cols = {c["name"] for c in inspector.get_columns("procurement_procedure")}
+        additions = {
+            "instrument_type": "VARCHAR(100)",
+            "goods_description": "TEXT",
+            "goods_value": "NUMERIC(18,2)",
+            "services_description": "TEXT",
+            "services_value": "NUMERIC(18,2)",
+        }
+        changed = False
+        for name, typ in additions.items():
+            if name not in cols:
+                db.session.execute(db.text(f"ALTER TABLE procurement_procedure ADD COLUMN {name} {typ}"))
+                changed = True
+        db.session.execute(db.text("UPDATE procurement_procedure SET instrument_type = 'Contrato público' WHERE instrument_type IS NULL"))
+        if changed or True:
             db.session.commit()
 
 
