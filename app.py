@@ -90,7 +90,9 @@ class Supplier(db.Model):
     email = db.Column(db.String(180))
     address = db.Column(db.String(300))
     category = db.Column(db.String(120))
-    contracting_type = db.Column(db.String(80), nullable=False)
+    # Mantido apenas para compatibilidade com bases antigas.
+    # O tipo de procedimento pertence à contratação, não ao fornecedor.
+    contracting_type = db.Column(db.String(80), nullable=True, default=None)
     portal_status = db.Column(db.String(80), default="Não verificado")
     certification_status = db.Column(db.String(80), default="Não informado")
     tax_clearance_expiry = db.Column(db.Date)
@@ -823,10 +825,8 @@ def add_alert(alert_type, severity, title, message, legal_basis="", supplier_id=
 def run_compliance_checks():
     today = date.today()
     # Supplier-document and eligibility alerts.
-    for s in Supplier.query.all():
-        if not s.contracting_type:
-            add_alert("FORNECEDOR_SEM_TIPO", "CRITICO", "Fornecedor sem tipo de contratação",
-                      f"O fornecedor {s.name} não tem tipo de contratação definido.", "Controlo interno", s.id)
+    # O fornecedor é uma entidade cadastral. Não se valida "tipo de contratação" aqui,
+    # porque o procedimento e o instrumento pertencem a cada contratação/contrato.
     # Contracts and expiration alerts.
     for c in Contract.query.all():
         days = (c.end_date - today).days
@@ -1129,9 +1129,10 @@ def suppliers():
         try:
             s = Supplier(name=request.form["name"].strip(), nif=request.form.get("nif"), phone=request.form.get("phone"),
                          email=request.form.get("email"), address=request.form.get("address"), category=request.form.get("category"),
-                         contracting_type=request.form["contracting_type"],
+                         # O procedimento/instrumento será registado na contratação/contrato.
+                         contracting_type="Não aplicável",
                          notes=request.form.get("notes"))
-            db.session.add(s); db.session.commit(); flash("Fornecedor criado. O tipo de contratação é obrigatório para acompanhamento.")
+            db.session.add(s); db.session.commit(); flash("Fornecedor criado com sucesso. O procedimento e o instrumento de contratação são registados na contratação/contrato.")
         except Exception as e:
             db.session.rollback(); flash("Não foi possível criar o fornecedor: "+str(e))
     return render_template("suppliers.html", rows=Supplier.query.order_by(Supplier.name).all())
@@ -1486,7 +1487,7 @@ ADMIN_MODELS = {
 }
 # Fields that are generated/system-only or intentionally removed from the supplier UI.
 ADMIN_EXCLUDED = {"id", "created_at", "password_hash", "source_hash", "raw_text", "extracted_data", "import_confidence"}
-ADMIN_MODEL_EXCLUDED = {"Supplier": {"portal_status", "certification_status", "tax_clearance_expiry", "social_security_expiry", "professional_license_expiry", "blocked"}}
+ADMIN_MODEL_EXCLUDED = {"Supplier": {"portal_status", "certification_status", "tax_clearance_expiry", "social_security_expiry", "professional_license_expiry", "blocked", "contracting_type"}}
 
 # Etiquetas de apresentação do painel administrativo.
 # Os nomes técnicos das colunas da base de dados permanecem inalterados;
