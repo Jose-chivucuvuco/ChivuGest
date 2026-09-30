@@ -15,6 +15,7 @@
   <textarea name="object" id="contract_object" placeholder="Objecto" required></textarea>
   <select name="contract_type" id="contract_type" required>{% for c in contract_categories %}<option>{{c}}</option>{% endfor %}</select>
   <input name="procedure_type" id="procedure_type" placeholder="Tipo de procedimento" required readonly>
+  <select name="instrument_type" id="instrument_type" required><option value="">Instrumento de contratação *</option>{% for i in contract_instruments %}<option>{{i}}</option>{% endfor %}</select>
 
   <label>Início<input name="start_date" type="date" required></label>
   <label>Fim<input name="end_date" type="date" required></label>
@@ -41,10 +42,10 @@
 <div class="panel">
 <div class="panelhead"><h2>Contratos registados</h2><span>Faturação, pagamentos e execução calculados automaticamente.</span></div>
 <table>
-<tr><th>Contrato</th><th>Fornecedor</th><th>Tipo</th><th>Valor actual</th><th>Faturado</th><th>Pago</th><th>Saldo</th><th>Execução</th><th>Fim</th><th>Estado</th>{% if session.role=='admin' %}<th>Ações</th>{% endif %}</tr>
+<tr><th>Contrato</th><th>Fornecedor</th><th>Tipo</th><th>Instrumento</th><th>Valor actual</th><th>Faturado</th><th>Pago</th><th>Saldo</th><th>Execução</th><th>Fim</th><th>Estado</th>{% if session.role=='admin' %}<th>Ações</th>{% endif %}</tr>
 {% for row in rows %}{% set c=row.obj %}
 <tr>
-<td><b>{{c.number}}</b></td><td>{{c.supplier.name}}</td><td>{{c.contract_type}}</td>
+<td><b>{{c.number}}</b></td><td>{{c.supplier.name}}</td><td>{{c.contract_type}}</td><td>{{c.instrument_type or "Contrato público"}}</td>
 <td>Kz {{"{:,.2f}".format(c.current_value or 0)}}</td>
 <td>Kz {{"{:,.2f}".format(row.invoiced)}}</td><td>Kz {{"{:,.2f}".format(row.paid)}}</td>
 <td>Kz {{"{:,.2f}".format(row.balance)}}</td><td>{{"{:.2f}".format(row.execution)}}%</td>
@@ -52,7 +53,7 @@
 <td>{% if c.status=='Em vigor' %}<span class="badge green">Em vigor</span>{% elif c.status=='Por regularizar' %}<span class="badge amber">Por regularizar</span>{% else %}<span class="badge">{{c.status}}</span>{% endif %}</td>
 {% if session.role=='admin' %}<td><a class="btn small secondary" href="/admin/edit/contract/{{c.id}}">Editar</a> <form method="post" action="/admin/delete/contract/{{c.id}}" style="display:inline" onsubmit="return confirm('Eliminar este contrato?')"><button class="btn small danger">Eliminar</button></form></td>{% endif %}
 </tr>
-{% else %}<tr><td colspan="11" class="empty">Nenhum contrato registado.</td></tr>{% endfor %}
+{% else %}<tr><td colspan="12" class="empty">Nenhum contrato registado.</td></tr>{% endfor %}
 </table>
 </div>
 <script>

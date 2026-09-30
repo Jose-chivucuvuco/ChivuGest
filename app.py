@@ -133,6 +133,7 @@ class Contract(db.Model):
     object = db.Column(db.Text, nullable=False)
     contract_type = db.Column(db.String(80), nullable=False)
     procedure_type = db.Column(db.String(80), nullable=False)
+    instrument_type = db.Column(db.String(100), nullable=True, default="Contrato público")
     start_date = db.Column(db.Date, nullable=False)
     end_date = db.Column(db.Date, nullable=False)
     original_value = db.Column(db.Numeric(18,2), nullable=False, default=0)
@@ -320,6 +321,21 @@ PROCEDURES = [
 ]
 CONTRACT_CATEGORIES = ["Empreitada", "Bens", "Serviços", "Concessão", "Locação"]
 CONTRACTING_TYPES = PROCEDURES + ["Outro / Regime especial"]
+
+# Instrumentos/formas contratuais relevantes para o ChivuGest.
+# São mantidos separados dos procedimentos de formação do contrato.
+CONTRACT_INSTRUMENTS = [
+    "Contrato público",
+    "Acordo-Quadro",
+    "Contrato ao abrigo de Acordo-Quadro",
+    "Contrato público de aprovisionamento",
+    "Concessão administrativa",
+    "Concessão de obras públicas",
+    "Concessão de serviços públicos",
+    "Concessão de exploração do domínio público",
+    "Parceria Público-Privada (PPP)",
+    "Outro / Regime especial",
+]
 
 
 def login_required(f):
@@ -1287,6 +1303,7 @@ def contracts():
             c=Contract(number=request.form["number"], supplier_id=supplier_id,
                 procedure_id=procedure.id if procedure else None,
                 object=object_value, contract_type=contract_type, procedure_type=procedure_type,
+                instrument_type=request.form.get("instrument_type") or "Contrato público",
                 start_date=start_date, end_date=end_date,
                 original_value=original, current_value=current,
                 renewal_allowed=bool(request.form.get("renewal_allowed")), renewal_count=int(request.form.get("renewal_count") or 0),
@@ -1307,7 +1324,7 @@ def contracts():
         balance = money(c.current_value) - invoiced
         execution = (invoiced / money(c.current_value) * 100) if money(c.current_value) else 0
         contract_rows.append({"obj":c,"invoiced":invoiced,"paid":paid,"balance":balance,"execution":execution})
-    return render_template("contracts.html", rows=contract_rows, suppliers=suppliers_list, procedures=procedures)
+    return render_template("contracts.html", rows=contract_rows, suppliers=suppliers_list, procedures=procedures, contract_instruments=CONTRACT_INSTRUMENTS)
 
 @app.route("/procurement", methods=["GET", "POST"])
 @login_required
@@ -1492,7 +1509,7 @@ ADMIN_FIELD_LABELS = {
     # Fornecedores / contratação pública
     "contracting_type": "Tipo de contratação",
     "object": "Objecto", "contract_category": "Categoria do contrato",
-    "contract_type": "Tipo de contrato", "procedure_id": "Procedimento",
+    "contract_type": "Tipo de contrato", "instrument_type": "Instrumento de contratação", "procedure_id": "Procedimento",
     "procedure_type": "Tipo de procedimento",
     "estimated_value": "Valor estimado", "budget_year": "Ano orçamental",
     "budgeted": "Orçamentado", "cabimentado": "Cabimentado",
@@ -1555,9 +1572,13 @@ def admin_field_specs(model):
         elif col.type.__class__.__name__ in ("Integer",): kind="int"
         elif col.type.__class__.__name__ in ("Numeric", "Float", "REAL"):
             kind="number"
+        # Instrumento de contratação é uma lista controlada.
+        options=[]
+        if col.name == "instrument_type":
+            options = [(v, v) for v in CONTRACT_INSTRUMENTS]
+            kind = "select"
         # Foreign keys get a select with human-readable choices.
         fk=next(iter(col.foreign_keys), None)
-        options=[]
         if fk:
             target=fk.column.table.name
             target_model=next((m for m in ADMIN_MODELS.values() if m.__tablename__==target), None)
@@ -1737,9 +1758,22 @@ def health(): return "OK", 200
 # -----------------------------------------------------------------------------
 # Database initialisation. Existing tables are preserved. New tables are added.
 # -----------------------------------------------------------------------------
+def ensure_schema_updates():
+    """Aplica pequenas actualizações de esquema sem apagar dados existentes."""
+    inspector = inspect(db.engine)
+    tables = inspector.get_table_names()
+    if "contract" in tables:
+        cols = {c["name"] for c in inspector.get_columns("contract")}
+        if "instrument_type" not in cols:
+            db.session.execute(db.text("ALTER TABLE contract ADD COLUMN instrument_type VARCHAR(100)"))
+            db.session.execute(db.text("UPDATE contract SET instrument_type = 'Contrato público' WHERE instrument_type IS NULL"))
+            db.session.commit()
+
+
 def init_db():
     with app.app_context():
         db.create_all()
+        ensure_schema_updates()
         if not User.query.filter_by(username="admin").first():
             db.session.add(User(name="Administrador",username="admin",password_hash=generate_password_hash("admin123"),role="admin"))
             db.session.commit()
