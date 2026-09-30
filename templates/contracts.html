@@ -8,14 +8,15 @@
   <input name="number" placeholder="N.º do contrato" required>
   <select name="procedure_id" id="procedure_id">
     <option value="">Procedimento associado (opcional)</option>
-    {% for p in procedures %}<option value="{{p.id}}" data-supplier="{{p.supplier_id or ''}}" data-object="{{p.object|e}}" data-category="{{p.contract_category}}" data-procedure="{{p.procedure_type}}" data-value="{{p.estimated_value or 0}}" data-instrument="{{p.instrument_type or 'Contrato público'}}" data-goods-desc="{{p.goods_description|e}}" data-goods-value="{{p.goods_value or 0}}" data-services-desc="{{p.services_description|e}}" data-services-value="{{p.services_value or 0}}" data-cab="{{p.cabimentacao_ref or ''}}" data-cab-ok="{{'1' if p.cabimentado else '0'}}">{{p.code}} — {{p.object[:60]}}</option>{% endfor %}
+    {% for p in procedures %}<option value="{{p.id}}" data-supplier="{{p.supplier_id or ''}}" data-object="{{p.object|e}}" data-category="{{p.contract_category}}" data-procedure="{{p.procedure_type}}" data-value="{{p.estimated_value or 0}}" data-cab="{{p.cabimentacao_ref or ''}}" data-cab-ok="{{'1' if p.cabimentado else '0'}}">{{p.code}} — {{p.object[:60]}}</option>{% endfor %}
   </select>
   <select name="supplier_id" id="supplier_id" required><option value="">Fornecedor</option>{% for s in suppliers %}<option value="{{s.id}}">{{s.name}}</option>{% endfor %}</select>
+  <select name="instrument_type" id="instrument_type"><option value="Contrato público">Instrumento: Contrato público</option>{% for i in instrument_types %}{% if i != "Contrato público" %}<option value="{{i}}">Instrumento: {{i}}</option>{% endif %}{% endfor %}</select>
+  <select name="framework_agreement_id" id="framework_agreement_id"><option value="">Acordo-Quadro (se aplicável)</option>{% for fa in framework_agreements %}<option value="{{fa.id}}">{{fa.code}} — {{fa.object[:70]}}</option>{% endfor %}</select>
 
   <textarea name="object" id="contract_object" placeholder="Objecto" required></textarea>
   <select name="contract_type" id="contract_type" required>{% for c in contract_categories %}<option>{{c}}</option>{% endfor %}</select>
   <input name="procedure_type" id="procedure_type" placeholder="Tipo de procedimento" required readonly>
-  <select name="instrument_type" id="instrument_type" required><option value="">Instrumento de contratação *</option>{% for i in contract_instruments %}<option>{{i}}</option>{% endfor %}</select>
 
   <label>Início<input name="start_date" type="date" required></label>
   <label>Fim<input name="end_date" type="date" required></label>
@@ -23,7 +24,6 @@
   <input name="current_value" id="current_value" type="number" step="0.01" min="0" placeholder="Valor actual (Kz)">
   <input name="cabimentacao_ref" id="cabimentacao_ref" placeholder="N.º Nota de Cabimentação">
   <input name="document_ref" placeholder="Referência do documento / arquivo">
-  <div id="contractMixedComponents" style="grid-column:1/-1;display:none;"><div class="legal-note"><b>Contratação mista:</b> indique separadamente os bens e os serviços. O total deve ser igual ao valor inicial do contrato.</div><div id="contractComponentSummary" class="legal-note" style="margin-top:10px;"></div><div class="form three"><input name="goods_description" id="goods_description" placeholder="Descrição dos bens"><input name="goods_value" id="goods_value" type="number" step="0.01" min="0" placeholder="Valor dos bens (Kz)"><input name="services_description" id="services_description" placeholder="Descrição dos serviços"><input name="services_value" id="services_value" type="number" step="0.01" min="0" placeholder="Valor dos serviços (Kz)"></div></div>
   <input name="advance_percent" type="number" step="0.01" min="0" placeholder="Adiantamento (%)">
   <input name="amendments_percent" type="number" step="0.01" min="0" placeholder="Adendas acumuladas (%)">
   <input name="renewal_count" type="number" min="0" value="0" placeholder="N.º de renovações">
@@ -43,10 +43,10 @@
 <div class="panel">
 <div class="panelhead"><h2>Contratos registados</h2><span>Faturação, pagamentos e execução calculados automaticamente.</span></div>
 <table>
-<tr><th>Contrato</th><th>Fornecedor</th><th>Tipo</th><th>Instrumento</th><th>Valor actual</th><th>Faturado</th><th>Pago</th><th>Saldo</th><th>Execução</th><th>Fim</th><th>Estado</th>{% if session.role=='admin' %}<th>Ações</th>{% endif %}</tr>
+<tr><th>Contrato</th><th>Fornecedor</th><th>Tipo</th><th>Instrumento</th><th>Acordo-Quadro</th><th>Valor actual</th><th>Faturado</th><th>Pago</th><th>Saldo</th><th>Execução</th><th>Fim</th><th>Estado</th>{% if session.role=='admin' %}<th>Ações</th>{% endif %}</tr>
 {% for row in rows %}{% set c=row.obj %}
 <tr>
-<td><b>{{c.number}}</b></td><td>{{c.supplier.name}}</td><td>{{c.contract_type}}</td><td>{{c.instrument_type or "Contrato público"}}</td>
+<td><b>{{c.number}}</b></td><td>{{c.supplier.name}}</td><td>{{c.contract_type}}</td><td>{{c.instrument_type or "—"}}</td><td>{{c.framework_agreement.code if c.framework_agreement else "—"}}</td>
 <td>Kz {{"{:,.2f}".format(c.current_value or 0)}}</td>
 <td>Kz {{"{:,.2f}".format(row.invoiced)}}</td><td>Kz {{"{:,.2f}".format(row.paid)}}</td>
 <td>Kz {{"{:,.2f}".format(row.balance)}}</td><td>{{"{:.2f}".format(row.execution)}}%</td>
@@ -54,7 +54,7 @@
 <td>{% if c.status=='Em vigor' %}<span class="badge green">Em vigor</span>{% elif c.status=='Por regularizar' %}<span class="badge amber">Por regularizar</span>{% else %}<span class="badge">{{c.status}}</span>{% endif %}</td>
 {% if session.role=='admin' %}<td><a class="btn small secondary" href="/admin/edit/contract/{{c.id}}">Editar</a> <form method="post" action="/admin/delete/contract/{{c.id}}" style="display:inline" onsubmit="return confirm('Eliminar este contrato?')"><button class="btn small danger">Eliminar</button></form></td>{% endif %}
 </tr>
-{% else %}<tr><td colspan="12" class="empty">Nenhum contrato registado.</td></tr>{% endfor %}
+{% else %}<tr><td colspan="13" class="empty">Nenhum contrato registado.</td></tr>{% endfor %}
 </table>
 </div>
 <script>
@@ -69,50 +69,12 @@
     set('contract_object',o.dataset.object);
     set('contract_type',o.dataset.category);
     set('procedure_type',o.dataset.procedure);
-    set('instrument_type',o.dataset.instrument);
-    set('goods_description',o.dataset.goodsDesc);
-    set('goods_value',o.dataset.goodsValue);
-    set('services_description',o.dataset.servicesDesc);
-    set('services_value',o.dataset.servicesValue);
     set('original_value',o.dataset.value);
     set('current_value',o.dataset.value);
     set('cabimentacao_ref',o.dataset.cab);
-    const mixed=document.getElementById('contractMixedComponents');
-    if(mixed) mixed.style.display=(o.dataset.category==='Bens e Serviços')?'block':'none';
     const cb=document.getElementById('cabimentado');
     if(cb) cb.checked=(o.dataset.cabOk==='1');
   });
-  const ct=document.getElementById('contract_type');
-  const mixed=document.getElementById('contractMixedComponents');
-  const original=document.getElementById('original_value');
-  const goods=document.getElementById('goods_value');
-  const services=document.getElementById('services_value');
-  const summary=document.getElementById('contractComponentSummary');
-  const form=document.getElementById('contractForm');
-  const submit=form ? form.querySelector('button[type="submit"], button:not([type])') : null;
-  function fmt(v){return new Intl.NumberFormat('pt-AO',{minimumFractionDigits:2,maximumFractionDigits:2}).format(v);}
-  function reconcile(){
-    if(!summary || !ct) return true;
-    if(ct.value!=='Bens e Serviços'){summary.style.display='none';if(submit)submit.disabled=false;return true;}
-    summary.style.display='block';
-    const ref=parseFloat(original && original.value || 0)||0;
-    const b=parseFloat(goods && goods.value || 0)||0;
-    const s=parseFloat(services && services.value || 0)||0;
-    const total=Math.round((b+s)*100)/100;
-    const diff=Math.round((ref-total)*100)/100;
-    if(Math.abs(diff)<=0.01){
-      summary.innerHTML='<b>✓ Composição válida:</b> Bens + Serviços = <b>Kz '+fmt(total)+'</b>, igual ao valor inicial.';
-      summary.style.borderColor='#b7e4c7';summary.style.background='#f0fff4';summary.style.color='#166534';if(submit)submit.disabled=false;return true;
-    }
-    const label=diff>0?'Em falta':'Acima do valor inicial';
-    summary.innerHTML='<b>⚠ Composição incompatível:</b> Total <b>Kz '+fmt(total)+'</b> | Valor inicial <b>Kz '+fmt(ref)+'</b> | <b>'+label+': Kz '+fmt(Math.abs(diff))+'</b>.';
-    summary.style.borderColor='#f5c2c7';summary.style.background='#fff5f5';summary.style.color='#b42318';if(submit)submit.disabled=true;return false;
-  }
-  function updateMixed(){if(mixed)mixed.style.display=(ct && ct.value==='Bens e Serviços')?'block':'none';reconcile();}
-  [ct,original,goods,services].forEach(e=>{if(e)e.addEventListener('input',reconcile);});
-  if(ct)ct.addEventListener('change',updateMixed);
-  if(form)form.addEventListener('submit',function(e){if(!reconcile() && ct.value==='Bens e Serviços'){e.preventDefault();alert('Corrija os valores de Bens e Serviços antes de guardar o contrato.');}});
-  updateMixed();
 })();
 </script>
 {% endblock %}

@@ -82,6 +82,27 @@ class Payment(db.Model):
 # -----------------------------------------------------------------------------
 # Supplier / procurement / contract management
 # -----------------------------------------------------------------------------
+class FrameworkAgreement(db.Model):
+    __tablename__ = "framework_agreement"
+    id = db.Column(db.Integer, primary_key=True)
+    code = db.Column(db.String(100), nullable=False, unique=True, index=True)
+    object = db.Column(db.Text, nullable=False)
+    procedure_type = db.Column(db.String(80), nullable=False, default="Concurso Limitado por Convite")
+    start_date = db.Column(db.Date)
+    end_date = db.Column(db.Date)
+    estimated_value = db.Column(db.Numeric(18,2), default=0)
+    status = db.Column(db.String(40), default="Em vigor")
+    legal_basis = db.Column(db.String(250))
+    document_ref = db.Column(db.String(300))
+    notes = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+framework_supplier = db.Table(
+    "framework_supplier",
+    db.Column("framework_id", db.Integer, db.ForeignKey("framework_agreement.id", ondelete="CASCADE"), primary_key=True),
+    db.Column("supplier_id", db.Integer, db.ForeignKey("supplier.id", ondelete="CASCADE"), primary_key=True),
+)
+
 class Supplier(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(220), nullable=False, index=True)
@@ -90,9 +111,7 @@ class Supplier(db.Model):
     email = db.Column(db.String(180))
     address = db.Column(db.String(300))
     category = db.Column(db.String(120))
-    # Mantido apenas para compatibilidade com bases antigas.
-    # O tipo de procedimento pertence à contratação, não ao fornecedor.
-    contracting_type = db.Column(db.String(80), nullable=True, default=None)
+    contracting_type = db.Column(db.String(80), nullable=False)
     portal_status = db.Column(db.String(80), default="Não verificado")
     certification_status = db.Column(db.String(80), default="Não informado")
     tax_clearance_expiry = db.Column(db.Date)
@@ -101,6 +120,7 @@ class Supplier(db.Model):
     blocked = db.Column(db.Boolean, nullable=False, default=False)
     notes = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    framework_agreements = db.relationship("FrameworkAgreement", secondary=framework_supplier, backref=db.backref("suppliers", lazy="dynamic"))
 
 class ProcurementProcedure(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -113,11 +133,6 @@ class ProcurementProcedure(db.Model):
     budgeted = db.Column(db.Boolean, default=False)
     cabimentado = db.Column(db.Boolean, default=False)
     cabimentacao_ref = db.Column(db.String(120))
-    instrument_type = db.Column(db.String(100), nullable=True, default="Contrato público")
-    goods_description = db.Column(db.Text)
-    goods_value = db.Column(db.Numeric(18,2), default=0)
-    services_description = db.Column(db.Text)
-    services_value = db.Column(db.Numeric(18,2), default=0)
     decision_date = db.Column(db.Date)
     invitation_date = db.Column(db.Date)
     proposal_deadline = db.Column(db.Date)
@@ -127,6 +142,9 @@ class ProcurementProcedure(db.Model):
     justification = db.Column(db.Text)
     status = db.Column(db.String(50), default="Em preparação")
     supplier_id = db.Column(db.Integer, db.ForeignKey("supplier.id"))
+    instrument_type = db.Column(db.String(100), default="Contrato público")
+    framework_agreement_id = db.Column(db.Integer, db.ForeignKey("framework_agreement.id"))
+    framework_agreement = db.relationship("FrameworkAgreement", backref="procedures")
     created_by = db.Column(db.Integer, db.ForeignKey("user.id"))
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     supplier = db.relationship("Supplier")
@@ -140,11 +158,9 @@ class Contract(db.Model):
     object = db.Column(db.Text, nullable=False)
     contract_type = db.Column(db.String(80), nullable=False)
     procedure_type = db.Column(db.String(80), nullable=False)
-    instrument_type = db.Column(db.String(100), nullable=True, default="Contrato público")
-    goods_description = db.Column(db.Text)
-    goods_value = db.Column(db.Numeric(18,2), default=0)
-    services_description = db.Column(db.Text)
-    services_value = db.Column(db.Numeric(18,2), default=0)
+    instrument_type = db.Column(db.String(100), default="Contrato público")
+    framework_agreement_id = db.Column(db.Integer, db.ForeignKey("framework_agreement.id"))
+    framework_agreement = db.relationship("FrameworkAgreement", backref="contracts")
     start_date = db.Column(db.Date, nullable=False)
     end_date = db.Column(db.Date, nullable=False)
     original_value = db.Column(db.Numeric(18,2), nullable=False, default=0)
@@ -332,21 +348,7 @@ PROCEDURES = [
 ]
 CONTRACT_CATEGORIES = ["Empreitada", "Bens", "Serviços", "Bens e Serviços", "Concessão", "Locação", "Outro / Regime especial"]
 CONTRACTING_TYPES = PROCEDURES + ["Outro / Regime especial"]
-
-# Instrumentos/formas contratuais relevantes para o ChivuGest.
-# São mantidos separados dos procedimentos de formação do contrato.
-CONTRACT_INSTRUMENTS = [
-    "Contrato público",
-    "Acordo-Quadro",
-    "Contrato ao abrigo de Acordo-Quadro",
-    "Contrato público de aprovisionamento",
-    "Concessão administrativa",
-    "Concessão de obras públicas",
-    "Concessão de serviços públicos",
-    "Concessão de exploração do domínio público",
-    "Parceria Público-Privada (PPP)",
-    "Outro / Regime especial",
-]
+INSTRUMENT_TYPES = ["Contrato público", "Acordo-Quadro", "Contrato ao abrigo de Acordo-Quadro", "Contrato público de aprovisionamento", "Concessão administrativa", "Concessão de obras públicas", "Concessão de serviços públicos", "Concessão de exploração do domínio público", "Parceria Público-Privada", "Outro / Regime especial"]
 
 
 def login_required(f):
@@ -373,7 +375,7 @@ def admin_required(f):
 @app.context_processor
 def globals_processor():
     return {"today": date.today(), "procedures": PROCEDURES, "contract_categories": CONTRACT_CATEGORIES,
-            "contracting_types": CONTRACTING_TYPES}
+            "contracting_types": CONTRACTING_TYPES, "instrument_types": INSTRUMENT_TYPES}
 
 
 def parse_date(v, default="__TODAY__"):
@@ -403,27 +405,6 @@ def num(v):
         s = s.replace(",", ".")
     try: return float(s)
     except (ValueError, TypeError): return 0.0
-
-
-def validate_mixed_components(category, reference_value, goods_value, services_value):
-    """Valida a composição de contratações mistas contra o valor de referência."""
-    if category != "Bens e Serviços":
-        return True, ""
-    reference = round(num(reference_value), 2)
-    goods = round(num(goods_value), 2)
-    services = round(num(services_value), 2)
-    total = round(goods + services, 2)
-    difference = round(reference - total, 2)
-    if abs(difference) > 0.01:
-        direction = "em falta" if difference > 0 else "acima"
-        return False, (
-            f"A composição de Bens e Serviços não corresponde ao valor de referência. "
-            f"Bens: Kz {goods:,.2f}; Serviços: Kz {services:,.2f}; "
-            f"Total dos componentes: Kz {total:,.2f}; "
-            f"Valor de referência: Kz {reference:,.2f}; "
-            f"Diferença: Kz {abs(difference):,.2f} ({direction})."
-        )
-    return True, ""
 
 
 def normalize_key(k):
@@ -855,8 +836,6 @@ def add_alert(alert_type, severity, title, message, legal_basis="", supplier_id=
 def run_compliance_checks():
     today = date.today()
     # Supplier-document and eligibility alerts.
-    # O fornecedor é uma entidade cadastral. Não se valida "tipo de contratação" aqui,
-    # porque o procedimento e o instrumento pertencem a cada contratação/contrato.
     # Contracts and expiration alerts.
     for c in Contract.query.all():
         days = (c.end_date - today).days
@@ -1047,107 +1026,28 @@ def logout():
 @app.route("/")
 @login_required
 def dashboard():
-    """Dashboard executivo baseado exclusivamente nos dados já existentes no ChivuGest."""
-    today = date.today()
-
     total_invoices = db.session.query(func.coalesce(func.sum(SupplierInvoice.total), 0)).scalar() or 0
     total_paid = db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).scalar() or 0
-    payable = max(float(total_invoices) - float(total_paid), 0)
+    payable = float(total_invoices) - float(total_paid)
     overdue = db.session.query(func.coalesce(func.sum(SupplierInvoice.total - SupplierInvoice.paid), 0)).filter(
-        SupplierInvoice.due_date < today, SupplierInvoice.total > SupplierInvoice.paid).scalar() or 0
-
-    invoice_count = SupplierInvoice.query.count()
-    paid_invoice_count = SupplierInvoice.query.filter_by(status="Paga").count()
-    partial_invoice_count = SupplierInvoice.query.filter_by(status="Parcial").count()
-    pending_invoice_count = SupplierInvoice.query.filter(
-        SupplierInvoice.total > SupplierInvoice.paid
-    ).count()
-
-    payment_count = SupplierPayment.query.count()
-    payment_order_count = PaymentOrder.query.count()
-    pending_orders = PaymentOrder.query.filter(
-        PaymentOrder.status.ilike("%pendente%")
-    ).count()
-    pending_order_value = db.session.query(
-        func.coalesce(func.sum(PaymentOrder.amount), 0)
-    ).filter(PaymentOrder.status.ilike("%pendente%" )).scalar() or 0
-
+        SupplierInvoice.due_date < date.today(), SupplierInvoice.total > SupplierInvoice.paid).scalar() or 0
     contracts_active = Contract.query.filter_by(status="Em vigor").count()
-    expiring = Contract.query.filter(
-        Contract.status == "Em vigor",
-        Contract.end_date <= today + timedelta(days=60),
-        Contract.end_date >= today
-    ).count()
-    expired_contracts = Contract.query.filter(
-        Contract.end_date < today, Contract.status == "Em vigor"
-    ).count()
-
+    expiring = Contract.query.filter(Contract.status == "Em vigor", Contract.end_date <= date.today()+timedelta(days=60), Contract.end_date >= date.today()).count()
     critical_alerts = ComplianceAlert.query.filter_by(resolved=False, severity="CRITICO").count()
     alert_count = ComplianceAlert.query.filter_by(resolved=False).count()
     suppliers = Supplier.query.count()
-
-    # Série mensal: facturação vs pagamentos, sem inventar uma dotação orçamental.
-    invoice_monthly = db.session.query(
-        func.extract("year", SupplierInvoice.issue_date).label("y"),
-        func.extract("month", SupplierInvoice.issue_date).label("m"),
-        func.sum(SupplierInvoice.total).label("v")
-    ).group_by("y", "m").order_by("y", "m").all()
-
-    payment_monthly = db.session.query(
-        func.extract("year", SupplierPayment.date).label("y"),
-        func.extract("month", SupplierPayment.date).label("m"),
-        func.sum(SupplierPayment.amount).label("v")
-    ).group_by("y", "m").order_by("y", "m").all()
-
-    month_map = {}
-    for r in invoice_monthly:
-        key=(int(r.y), int(r.m))
-        month_map.setdefault(key, {})["invoices"] = float(r.v or 0)
-    for r in payment_monthly:
-        key=(int(r.y), int(r.m))
-        month_map.setdefault(key, {})["payments"] = float(r.v or 0)
-
-    keys=sorted(month_map.keys())[-12:]
-    max_flow=max([max(month_map[k].get("invoices",0), month_map[k].get("payments",0)) for k in keys], default=0)
-    month_labels=["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]
-    months=[]
-    for y,m in keys:
-        invv=month_map[(y,m)].get("invoices",0)
-        payv=month_map[(y,m)].get("payments",0)
-        months.append({
-            "label": month_labels[m-1], "year": y, "invoices": invv, "payments": payv,
-            "invoice_height": 18 + (invv/(max_flow or 1))*150,
-            "payment_height": 18 + (payv/(max_flow or 1))*150
-        })
-
-    recent_invoices = SupplierInvoice.query.order_by(SupplierInvoice.id.desc()).limit(6).all()
-    recent_payments = SupplierPayment.query.order_by(SupplierPayment.id.desc()).limit(6).all()
-    recent_orders = PaymentOrder.query.order_by(PaymentOrder.id.desc()).limit(6).all()
-    recent_contracts = Contract.query.filter(Contract.status == "Em vigor", Contract.end_date >= today).order_by(Contract.end_date).limit(6).all()
-
-    # Saldo por fornecedor, usando facturas menos pagamentos associados ao fornecedor.
-    supplier_balances=[]
-    for s in Supplier.query.order_by(Supplier.name).all():
-        inv_total=db.session.query(func.coalesce(func.sum(SupplierInvoice.total),0)).filter(SupplierInvoice.supplier_id==s.id).scalar() or 0
-        paid_total=db.session.query(func.coalesce(func.sum(SupplierPayment.amount),0)).filter(SupplierPayment.supplier_id==s.id).scalar() or 0
-        balance=float(inv_total)-float(paid_total)
-        if balance > 0:
-            supplier_balances.append({"name":s.name,"balance":balance})
-    supplier_balances=sorted(supplier_balances,key=lambda x:x["balance"],reverse=True)[:5]
-
+    recent_payments = SupplierPayment.query.order_by(SupplierPayment.id.desc()).limit(8).all()
+    recent_contracts = Contract.query.order_by(Contract.end_date).limit(6).all()
+    monthly = db.session.query(func.extract("year", SupplierPayment.date).label("y"), func.extract("month", SupplierPayment.date).label("m"), func.sum(SupplierPayment.amount).label("v")).group_by("y","m").order_by("y","m").all()
+    months = [{"label": f"{int(r.y):04d}-{int(r.m):02d}", "value": float(r.v or 0)} for r in monthly]
+    maxv = max([m["value"] for m in months], default=0)
+    for m in months: m["height"] = 20 + (m["value"]/(maxv or 1))*180
     run_compliance_checks()
     latest_backup = BackupRecord.query.order_by(BackupRecord.created_at.desc()).first()
-    return render_template(
-        "dashboard.html", total_invoices=total_invoices, total_paid=total_paid, payable=payable,
-        overdue=overdue, contracts_active=contracts_active, expiring=expiring,
-        expired_contracts=expired_contracts, critical_alerts=critical_alerts, alert_count=alert_count,
-        suppliers=suppliers, invoice_count=invoice_count, paid_invoice_count=paid_invoice_count,
-        partial_invoice_count=partial_invoice_count, pending_invoice_count=pending_invoice_count,
-        payment_count=payment_count, payment_order_count=payment_order_count, pending_orders=pending_orders,
-        pending_order_value=pending_order_value, recent_payments=recent_payments, recent_orders=recent_orders,
-        recent_invoices=recent_invoices, recent_contracts=recent_contracts, months=months, today=today.isoformat(),
-        supplier_balances=supplier_balances, latest_backup=latest_backup
-    )
+    return render_template("dashboard.html", total_invoices=total_invoices, total_paid=total_paid, payable=payable,
+                           overdue=overdue, contracts_active=contracts_active, expiring=expiring,
+                           critical_alerts=critical_alerts, alert_count=alert_count, suppliers=suppliers,
+                           recent_payments=recent_payments, recent_contracts=recent_contracts, months=months, latest_backup=latest_backup)
 
 # -----------------------------------------------------------------------------
 # Suppliers
@@ -1159,10 +1059,9 @@ def suppliers():
         try:
             s = Supplier(name=request.form["name"].strip(), nif=request.form.get("nif"), phone=request.form.get("phone"),
                          email=request.form.get("email"), address=request.form.get("address"), category=request.form.get("category"),
-                         # O procedimento/instrumento será registado na contratação/contrato.
                          contracting_type="Não aplicável",
                          notes=request.form.get("notes"))
-            db.session.add(s); db.session.commit(); flash("Fornecedor criado com sucesso. O procedimento e o instrumento de contratação são registados na contratação/contrato.")
+            db.session.add(s); db.session.commit(); flash("Fornecedor criado. Pode ser associado a vários procedimentos e Acordos-Quadro.")
         except Exception as e:
             db.session.rollback(); flash("Não foi possível criar o fornecedor: "+str(e))
     return render_template("suppliers.html", rows=Supplier.query.order_by(Supplier.name).all())
@@ -1304,35 +1203,61 @@ def current_account():
 # -----------------------------------------------------------------------------
 # Contracts and procurement
 # -----------------------------------------------------------------------------
+@app.route("/framework-agreements", methods=["GET", "POST"])
+@login_required
+def framework_agreements():
+    suppliers_list = Supplier.query.order_by(Supplier.name).all()
+    if request.method == "POST":
+        try:
+            code=request.form["code"].strip()
+            if FrameworkAgreement.query.filter_by(code=code).first():
+                raise ValueError("Já existe um Acordo-Quadro com este número/código.")
+            fa=FrameworkAgreement(
+                code=code, object=request.form["object"].strip(),
+                procedure_type=request.form.get("procedure_type") or "Concurso Limitado por Convite",
+                start_date=parse_date(request.form.get("start_date"), None),
+                end_date=parse_date(request.form.get("end_date"), None),
+                estimated_value=num(request.form.get("estimated_value")),
+                status=request.form.get("status") or "Em vigor",
+                legal_basis=request.form.get("legal_basis"), document_ref=request.form.get("document_ref"),
+                notes=request.form.get("notes"))
+            selected=[]
+            for sid in request.form.getlist("supplier_ids"):
+                s=db.session.get(Supplier,int(sid))
+                if s: selected.append(s)
+            if not selected: raise ValueError("Associe pelo menos um fornecedor ao Acordo-Quadro.")
+            fa.suppliers.extend(selected)
+            db.session.add(fa); db.session.commit()
+            flash(f"Acordo-Quadro {fa.code} criado com {len(selected)} fornecedor(es).")
+        except Exception as e:
+            db.session.rollback(); flash("Erro ao criar Acordo-Quadro: "+str(e))
+    rows=FrameworkAgreement.query.order_by(FrameworkAgreement.id.desc()).all()
+    return render_template("framework_agreements.html", rows=rows, suppliers=suppliers_list)
+
 @app.route("/contracts", methods=["GET", "POST"])
 @login_required
 def contracts():
     suppliers_list=Supplier.query.order_by(Supplier.name).all()
     procedures=ProcurementProcedure.query.order_by(ProcurementProcedure.code).all()
+    framework_agreements=FrameworkAgreement.query.order_by(FrameworkAgreement.code).all()
     if request.method == "POST":
         try:
             procedure = db.session.get(ProcurementProcedure, int(request.form["procedure_id"])) if request.form.get("procedure_id") else None
             supplier_id = int(request.form["supplier_id"]) if request.form.get("supplier_id") else None
             contract_type = request.form.get("contract_type") or "Serviços"
             procedure_type = request.form.get("procedure_type") or ""
+            instrument_type = request.form.get("instrument_type") or "Contrato público"
+            framework_agreement_id = int(request.form["framework_agreement_id"]) if request.form.get("framework_agreement_id") else None
             object_value = request.form.get("object", "").strip()
 
             # If a procedure is selected, its core data becomes the source of truth.
-            instrument_value = request.form.get("instrument_type") or "Contrato público"
-            goods_description = request.form.get("goods_description")
-            goods_value = num(request.form.get("goods_value"))
-            services_description = request.form.get("services_description")
-            services_value = num(request.form.get("services_value"))
             if procedure:
                 supplier_id = procedure.supplier_id or supplier_id
                 contract_type = procedure.contract_category or contract_type
                 procedure_type = procedure.procedure_type or procedure_type
+                instrument_type = procedure.instrument_type or instrument_type
+                framework_agreement_id = procedure.framework_agreement_id or framework_agreement_id
                 object_value = procedure.object or object_value
-                instrument_value = procedure.instrument_type or instrument_value
-                goods_description = procedure.goods_description or goods_description
-                goods_value = money(procedure.goods_value) or goods_value
-                services_description = procedure.services_description or services_description
-                services_value = money(procedure.services_value) or services_value
             if not supplier_id:
                 raise ValueError("Selecione o fornecedor ou associe um procedimento com fornecedor.")
             if not object_value:
@@ -1341,16 +1266,9 @@ def contracts():
             end_date=parse_date(request.form["end_date"])
             original=num(request.form["original_value"])
             current=num(request.form.get("current_value") or original)
-            valid_components, components_message = validate_mixed_components(
-                contract_type, original, goods_value, services_value
-            )
-            if not valid_components:
-                raise ValueError(components_message)
             c=Contract(number=request.form["number"], supplier_id=supplier_id,
                 procedure_id=procedure.id if procedure else None,
                 object=object_value, contract_type=contract_type, procedure_type=procedure_type,
-                instrument_type=instrument_value, goods_description=goods_description, goods_value=goods_value,
-                services_description=services_description, services_value=services_value,
                 start_date=start_date, end_date=end_date,
                 original_value=original, current_value=current,
                 renewal_allowed=bool(request.form.get("renewal_allowed")), renewal_count=int(request.form.get("renewal_count") or 0),
@@ -1371,45 +1289,25 @@ def contracts():
         balance = money(c.current_value) - invoiced
         execution = (invoiced / money(c.current_value) * 100) if money(c.current_value) else 0
         contract_rows.append({"obj":c,"invoiced":invoiced,"paid":paid,"balance":balance,"execution":execution})
-    return render_template("contracts.html", rows=contract_rows, suppliers=suppliers_list, procedures=procedures, contract_instruments=CONTRACT_INSTRUMENTS)
+    return render_template("contracts.html", rows=contract_rows, suppliers=suppliers_list, procedures=procedures, framework_agreements=framework_agreements)
 
 @app.route("/procurement", methods=["GET", "POST"])
 @login_required
 def procurement():
     suppliers_list=Supplier.query.order_by(Supplier.name).all()
+    framework_agreements=FrameworkAgreement.query.order_by(FrameworkAgreement.code).all()
     if request.method == "POST":
         try:
-            contract_category = request.form["contract_category"]
-            estimated_value = num(request.form["estimated_value"])
-            goods_value = num(request.form.get("goods_value"))
-            services_value = num(request.form.get("services_value"))
-            valid_components, components_message = validate_mixed_components(
-                contract_category, estimated_value, goods_value, services_value
-            )
-            if not valid_components:
-                raise ValueError(components_message)
-            legal_basis = request.form.get("legal_basis") or ""
-            legal_basis_other = request.form.get("legal_basis_other") or ""
-            justification = (request.form.get("justification") or "").strip()
-            if legal_basis == "OUTRO":
-                if not legal_basis_other.strip():
-                    raise ValueError("Indique o outro fundamento legal.")
-                legal_basis = legal_basis_other.strip()
-            if request.form.get("procedure_type") in ("Contratação Simplificada", "Contratação Emergencial") and not justification:
-                raise ValueError("A fundamentação do procedimento é obrigatória para Contratação Simplificada e Contratação Emergencial.")
-            p=ProcurementProcedure(code=request.form["code"], object=request.form["object"], contract_category=contract_category,
-                procedure_type=request.form["procedure_type"], estimated_value=estimated_value, budget_year=int(request.form.get("budget_year") or date.today().year),
+            p=ProcurementProcedure(code=request.form["code"], object=request.form["object"], contract_category=request.form["contract_category"],
+                procedure_type=request.form["procedure_type"], instrument_type=request.form.get("instrument_type") or "Contrato público", framework_agreement_id=int(request.form["framework_agreement_id"]) if request.form.get("framework_agreement_id") else None, estimated_value=num(request.form["estimated_value"]), budget_year=int(request.form.get("budget_year") or date.today().year),
                 budgeted=bool(request.form.get("budgeted")), cabimentado=bool(request.form.get("cabimentado")), cabimentacao_ref=request.form.get("cabimentacao_ref"),
-                instrument_type=request.form.get("instrument_type") or "Contrato público",
-                goods_description=request.form.get("goods_description"), goods_value=goods_value,
-                services_description=request.form.get("services_description"), services_value=services_value,
                 decision_date=parse_date(request.form.get("decision_date"), None), invitation_date=parse_date(request.form.get("invitation_date"), None),
                 proposal_deadline=parse_date(request.form.get("proposal_deadline"), None), adjudication_date=parse_date(request.form.get("adjudication_date"), None),
-                portal_registered=bool(request.form.get("portal_registered")), legal_basis=legal_basis, justification=justification,
+                portal_registered=bool(request.form.get("portal_registered")), legal_basis=request.form.get("legal_basis"), justification=request.form.get("justification"),
                 status=request.form.get("status","Em preparação"), supplier_id=int(request.form["supplier_id"]) if request.form.get("supplier_id") else None, created_by=session["uid"])
             db.session.add(p); db.session.commit(); run_compliance_checks(); flash("Procedimento registado e analisado.")
         except Exception as e: db.session.rollback(); flash("Erro no procedimento: "+str(e))
-    return render_template("procurement.html", rows=ProcurementProcedure.query.order_by(ProcurementProcedure.id.desc()).all(), suppliers=suppliers_list, contract_instruments=CONTRACT_INSTRUMENTS)
+    return render_template("procurement.html", rows=ProcurementProcedure.query.order_by(ProcurementProcedure.id.desc()).all(), suppliers=suppliers_list, framework_agreements=framework_agreements)
 
 @app.route("/alerts")
 @login_required
@@ -1554,79 +1452,7 @@ ADMIN_MODELS = {
 }
 # Fields that are generated/system-only or intentionally removed from the supplier UI.
 ADMIN_EXCLUDED = {"id", "created_at", "password_hash", "source_hash", "raw_text", "extracted_data", "import_confidence"}
-ADMIN_MODEL_EXCLUDED = {"Supplier": {"portal_status", "certification_status", "tax_clearance_expiry", "social_security_expiry", "professional_license_expiry", "blocked", "contracting_type"}}
-
-# Etiquetas de apresentação do painel administrativo.
-# Os nomes técnicos das colunas da base de dados permanecem inalterados;
-# apenas a camada visual é traduzida para português.
-ADMIN_FIELD_LABELS = {
-    # Gerais
-    "name": "Nome", "username": "Nome de utilizador", "role": "Perfil",
-    "active": "Activo", "phone": "Telefone", "email": "E-mail",
-    "address": "Endereço", "category": "Categoria", "notes": "Observações",
-    "nif": "NIF", "status": "Estado", "code": "Código",
-
-    # Facturas / pagamentos
-    "number": "Número", "receipt": "Recibo", "client_id": "Cliente",
-    "supplier_id": "Fornecedor", "invoice_id": "Factura", "contract_id": "Contrato",
-    "date": "Data", "issue_date": "Data de emissão", "due_date": "Data de vencimento",
-    "amount": "Valor", "paid": "Valor pago", "method": "Método de pagamento",
-    "subtotal": "Subtotal", "vat": "IVA", "total": "Total",
-    "currency": "Moeda", "reference": "Referência",
-
-    # Fornecedores / contratação pública
-    "contracting_type": "Tipo de contratação",
-    "object": "Objecto",
-    "contract_type": "Tipo de contrato", "contract_category": "Objecto / natureza da contratação",
-    "instrument_type": "Instrumento de contratação", "procedure_id": "Procedimento",
-    "procedure_type": "Procedimento de contratação",
-    "goods_description": "Descrição dos bens", "goods_value": "Valor dos bens",
-    "services_description": "Descrição dos serviços", "services_value": "Valor dos serviços",
-    "estimated_value": "Valor estimado", "budget_year": "Ano orçamental",
-    "budgeted": "Orçamentado", "cabimentado": "Cabimentado",
-    "cabimentacao_ref": "Referência da cabimentação",
-    "decision_date": "Data da decisão", "invitation_date": "Data do convite",
-    "proposal_deadline": "Prazo para apresentação de propostas",
-    "adjudication_date": "Data da adjudicação",
-    "portal_registered": "Registado no Portal",
-    "legal_basis": "Base legal", "justification": "Justificação",
-    "supplier": "Fornecedor",
-
-    # Contratos
-    "start_date": "Data de início", "end_date": "Data de fim",
-    "original_value": "Valor inicial", "current_value": "Valor actual",
-    "renewal_allowed": "Renovação permitida", "renewal_count": "Número de renovações",
-    "tribunal_review_required": "Revisão pelo Tribunal necessária",
-    "tribunal_review_status": "Estado da revisão pelo Tribunal",
-    "guarantee_required": "Garantia exigida", "guarantee_value": "Valor da garantia",
-    "advance_percent": "Percentagem de adiantamento",
-    "amendments_percent": "Percentagem de alterações",
-    "document_ref": "Referência do documento",
-
-    # Ordens de Saque / reconciliação
-    "os_number": "Número da Ordem de Saque",
-    "issue_date": "Data de emissão", "bank_reference": "Referência bancária",
-    "source_type": "Tipo de documento fonte",
-    "reconciliation_status": "Estado da reconciliação",
-    "reconciliation_notes": "Notas de reconciliação",
-
-    # Documentos fonte / importação
-    "document_type": "Tipo de documento", "document_number": "Número do documento",
-    "source_filename": "Ficheiro de origem", "import_confidence": "Confiança da importação (%)",
-
-    # Regras / conformidade
-    "title": "Título", "source": "Fonte", "article": "Artigo",
-    "summary": "Resumo", "severity": "Gravidade", "parameter": "Parâmetro",
-    "value": "Valor", "source_url": "URL da fonte", "version": "Versão",
-    "alert_type": "Tipo de alerta", "message": "Mensagem",
-    "resolved": "Resolvido",
-
-    # Documentos legais / versões
-    "description": "Descrição", "current_version": "Versão actual",
-    "document_id": "Documento", "exercise": "Exercício",
-    "effective_from": "Vigente desde", "effective_to": "Vigente até",
-    "changed": "Alterado",
-}
+ADMIN_MODEL_EXCLUDED = {"Supplier": {"portal_status", "certification_status", "tax_clearance_expiry", "social_security_expiry", "professional_license_expiry", "blocked"}}
 
 
 def admin_field_specs(model):
@@ -1643,13 +1469,9 @@ def admin_field_specs(model):
         elif col.type.__class__.__name__ in ("Integer",): kind="int"
         elif col.type.__class__.__name__ in ("Numeric", "Float", "REAL"):
             kind="number"
-        # Instrumento de contratação é uma lista controlada.
-        options=[]
-        if col.name == "instrument_type":
-            options = [(v, v) for v in CONTRACT_INSTRUMENTS]
-            kind = "select"
         # Foreign keys get a select with human-readable choices.
         fk=next(iter(col.foreign_keys), None)
+        options=[]
         if fk:
             target=fk.column.table.name
             target_model=next((m for m in ADMIN_MODELS.values() if m.__tablename__==target), None)
@@ -1658,13 +1480,7 @@ def admin_field_specs(model):
                     label=getattr(obj,"name",None) or getattr(obj,"number",None) or getattr(obj,"code",None) or str(obj.id)
                     options.append((obj.id,label))
                 kind="select"
-        specs.append({
-            "name": col.name,
-            "label": ADMIN_FIELD_LABELS.get(col.name, col.name.replace("_", " ").capitalize()),
-            "kind": kind,
-            "options": options,
-            "value": None
-        })
+        specs.append({"name":col.name,"label":col.name.replace("_"," ").title(),"kind":kind,"options":options,"value":None})
     return specs
 
 @app.route("/admin/data")
@@ -1829,50 +1645,35 @@ def health(): return "OK", 200
 # -----------------------------------------------------------------------------
 # Database initialisation. Existing tables are preserved. New tables are added.
 # -----------------------------------------------------------------------------
-def ensure_schema_updates():
-    """Aplica pequenas actualizações de esquema sem apagar dados existentes."""
+def ensure_schema():
+    """Lightweight additive migration for existing SQLite/PostgreSQL installations."""
     inspector = inspect(db.engine)
-    tables = inspector.get_table_names()
-    if "contract" in tables:
-        cols = {c["name"] for c in inspector.get_columns("contract")}
-        additions = {
-            "instrument_type": "VARCHAR(100)",
-            "goods_description": "TEXT",
-            "goods_value": "NUMERIC(18,2)",
-            "services_description": "TEXT",
-            "services_value": "NUMERIC(18,2)",
-        }
-        changed = False
-        for name, typ in additions.items():
-            if name not in cols:
-                db.session.execute(db.text(f"ALTER TABLE contract ADD COLUMN {name} {typ}"))
-                changed = True
-        db.session.execute(db.text("UPDATE contract SET instrument_type = 'Contrato público' WHERE instrument_type IS NULL"))
-        if changed or True:
-            db.session.commit()
-    if "procurement_procedure" in tables:
-        cols = {c["name"] for c in inspector.get_columns("procurement_procedure")}
-        additions = {
-            "instrument_type": "VARCHAR(100)",
-            "goods_description": "TEXT",
-            "goods_value": "NUMERIC(18,2)",
-            "services_description": "TEXT",
-            "services_value": "NUMERIC(18,2)",
-        }
-        changed = False
-        for name, typ in additions.items():
-            if name not in cols:
-                db.session.execute(db.text(f"ALTER TABLE procurement_procedure ADD COLUMN {name} {typ}"))
-                changed = True
-        db.session.execute(db.text("UPDATE procurement_procedure SET instrument_type = 'Contrato público' WHERE instrument_type IS NULL"))
-        if changed or True:
-            db.session.commit()
-
+    tables = set(inspector.get_table_names())
+    if "framework_agreement" not in tables:
+        FrameworkAgreement.__table__.create(bind=db.engine, checkfirst=True)
+    if "framework_supplier" not in tables:
+        framework_supplier.create(bind=db.engine, checkfirst=True)
+    def add_column(table, column, ddl):
+        if table not in inspect(db.engine).get_table_names(): return
+        names={c["name"] for c in inspect(db.engine).get_columns(table)}
+        if column not in names:
+            with db.engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+    add_column("procurement_procedure", "instrument_type", "VARCHAR(100)")
+    add_column("procurement_procedure", "framework_agreement_id", "INTEGER")
+    add_column("contract", "instrument_type", "VARCHAR(100)")
+    add_column("contract", "framework_agreement_id", "INTEGER")
+    add_column("supplier", "contracting_type", "VARCHAR(80)")
+    # Existing suppliers remain valid; this field is now legacy and no longer used by the UI.
+    with db.engine.begin() as conn:
+        conn.execute(text("UPDATE supplier SET contracting_type='Não aplicável' WHERE contracting_type IS NULL OR contracting_type=''"))
+        conn.execute(text("UPDATE procurement_procedure SET instrument_type='Contrato público' WHERE instrument_type IS NULL OR instrument_type=''"))
+        conn.execute(text("UPDATE contract SET instrument_type='Contrato público' WHERE instrument_type IS NULL OR instrument_type=''"))
 
 def init_db():
     with app.app_context():
         db.create_all()
-        ensure_schema_updates()
+        ensure_schema()
         if not User.query.filter_by(username="admin").first():
             db.session.add(User(name="Administrador",username="admin",password_hash=generate_password_hash("admin123"),role="admin"))
             db.session.commit()
