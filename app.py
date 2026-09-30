@@ -1471,6 +1471,75 @@ ADMIN_MODELS = {
 ADMIN_EXCLUDED = {"id", "created_at", "password_hash", "source_hash", "raw_text", "extracted_data", "import_confidence"}
 ADMIN_MODEL_EXCLUDED = {"Supplier": {"portal_status", "certification_status", "tax_clearance_expiry", "social_security_expiry", "professional_license_expiry", "blocked"}}
 
+# Etiquetas de apresentação do painel administrativo.
+# Os nomes técnicos das colunas da base de dados permanecem inalterados;
+# apenas a camada visual é traduzida para português.
+ADMIN_FIELD_LABELS = {
+    # Gerais
+    "name": "Nome", "username": "Nome de utilizador", "role": "Perfil",
+    "active": "Activo", "phone": "Telefone", "email": "E-mail",
+    "address": "Endereço", "category": "Categoria", "notes": "Observações",
+    "nif": "NIF", "status": "Estado", "code": "Código",
+
+    # Facturas / pagamentos
+    "number": "Número", "receipt": "Recibo", "client_id": "Cliente",
+    "supplier_id": "Fornecedor", "invoice_id": "Factura", "contract_id": "Contrato",
+    "date": "Data", "issue_date": "Data de emissão", "due_date": "Data de vencimento",
+    "amount": "Valor", "paid": "Valor pago", "method": "Método de pagamento",
+    "subtotal": "Subtotal", "vat": "IVA", "total": "Total",
+    "currency": "Moeda", "reference": "Referência",
+
+    # Fornecedores / contratação pública
+    "contracting_type": "Tipo de contratação",
+    "object": "Objecto", "contract_category": "Categoria do contrato",
+    "contract_type": "Tipo de contrato", "procedure_id": "Procedimento",
+    "procedure_type": "Tipo de procedimento",
+    "estimated_value": "Valor estimado", "budget_year": "Ano orçamental",
+    "budgeted": "Orçamentado", "cabimentado": "Cabimentado",
+    "cabimentacao_ref": "Referência da cabimentação",
+    "decision_date": "Data da decisão", "invitation_date": "Data do convite",
+    "proposal_deadline": "Prazo para apresentação de propostas",
+    "adjudication_date": "Data da adjudicação",
+    "portal_registered": "Registado no Portal",
+    "legal_basis": "Base legal", "justification": "Justificação",
+    "supplier": "Fornecedor",
+
+    # Contratos
+    "start_date": "Data de início", "end_date": "Data de fim",
+    "original_value": "Valor inicial", "current_value": "Valor actual",
+    "renewal_allowed": "Renovação permitida", "renewal_count": "Número de renovações",
+    "tribunal_review_required": "Revisão pelo Tribunal necessária",
+    "tribunal_review_status": "Estado da revisão pelo Tribunal",
+    "guarantee_required": "Garantia exigida", "guarantee_value": "Valor da garantia",
+    "advance_percent": "Percentagem de adiantamento",
+    "amendments_percent": "Percentagem de alterações",
+    "document_ref": "Referência do documento",
+
+    # Ordens de Saque / reconciliação
+    "os_number": "Número da Ordem de Saque",
+    "issue_date": "Data de emissão", "bank_reference": "Referência bancária",
+    "source_type": "Tipo de documento fonte",
+    "reconciliation_status": "Estado da reconciliação",
+    "reconciliation_notes": "Notas de reconciliação",
+
+    # Documentos fonte / importação
+    "document_type": "Tipo de documento", "document_number": "Número do documento",
+    "source_filename": "Ficheiro de origem", "import_confidence": "Confiança da importação (%)",
+
+    # Regras / conformidade
+    "title": "Título", "source": "Fonte", "article": "Artigo",
+    "summary": "Resumo", "severity": "Gravidade", "parameter": "Parâmetro",
+    "value": "Valor", "source_url": "URL da fonte", "version": "Versão",
+    "alert_type": "Tipo de alerta", "message": "Mensagem",
+    "resolved": "Resolvido",
+
+    # Documentos legais / versões
+    "description": "Descrição", "current_version": "Versão actual",
+    "document_id": "Documento", "exercise": "Exercício",
+    "effective_from": "Vigente desde", "effective_to": "Vigente até",
+    "changed": "Alterado",
+}
+
 
 def admin_field_specs(model):
     specs=[]
@@ -1497,7 +1566,13 @@ def admin_field_specs(model):
                     label=getattr(obj,"name",None) or getattr(obj,"number",None) or getattr(obj,"code",None) or str(obj.id)
                     options.append((obj.id,label))
                 kind="select"
-        specs.append({"name":col.name,"label":col.name.replace("_"," ").title(),"kind":kind,"options":options,"value":None})
+        specs.append({
+            "name": col.name,
+            "label": ADMIN_FIELD_LABELS.get(col.name, col.name.replace("_", " ").capitalize()),
+            "kind": kind,
+            "options": options,
+            "value": None
+        })
     return specs
 
 @app.route("/admin/data")
