@@ -10,16 +10,16 @@
 <textarea name="notes" placeholder="Observações"></textarea><button>Criar Acordo-Quadro</button></form></div>
 <div class="panel"><div class="panelhead"><h2>Acordos-Quadro registados</h2><span>{{rows|length}}</span></div>
 <table>
-<tr><th>Acordo</th><th>Objecto</th><th>Procedimento</th><th>Fornecedores</th><th>Contratos associados</th><th>Valor</th><th>Vigência</th><th>Estado</th></tr>
+<tr><th>Acordo</th><th>Objecto</th><th>Procedimento</th><th>Fornecedores</th><th>Contratos associados</th><th>Valor</th><th>Vigência</th><th>Estado</th><th>Acções</th></tr>
 {% for fa in rows %}
 <tr>
 <td><b>{{fa.code}}</b></td><td>{{fa.object}}</td><td>{{fa.procedure_type}}</td>
 <td>{% for s in fa.suppliers.all() %}<span class="badge">{{s.name}}</span> {% endfor %}</td>
 <td><a href="/contracts">{{fa.contracts|length}}</a></td>
 <td>Kz {{"{:,.2f}".format(fa.estimated_value or 0)}}</td>
-<td>{{fa.start_date or '—'}} → {{fa.end_date or '—'}}</td><td>{{fa.status}}</td>
+<td>{{fa.start_date or '—'}} → {{fa.end_date or '—'}}</td><td>{{fa.status}}</td><td><a class="button secondary" href="/framework-agreements/{{fa.id}}/edit">Editar</a></td>
 </tr>
-{% else %}<tr><td colspan="8" class="empty">Nenhum Acordo-Quadro registado.</td></tr>{% endfor %}
+{% else %}<tr><td colspan="9" class="empty">Nenhum Acordo-Quadro registado.</td></tr>{% endfor %}
 </table>
 <p class="form-help">O número de contratos associados pode ser <b>0</b>. O Acordo-Quadro é uma entidade autónoma; os contratos são registados posteriormente quando existirem.</p>
 </div>

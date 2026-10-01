@@ -1,0 +1,22 @@
+{% extends "base.html" %}{% block content %}
+<div class="pagehead"><div><h1>Editar Acordo-Quadro</h1><p class="muted">Actualize os dados do Acordo-Quadro sem criar um novo registo.</p></div><a class="button secondary" href="/framework-agreements">← Voltar aos Acordos-Quadro</a></div>
+<div class="legal-note"><b>Regra:</b> o Acordo-Quadro é independente dos contratos. Pode ter 0, 1 ou vários contratos associados.</div>
+<div class="panel"><h2>Editar {{fa.code}}</h2>
+<form method="post" class="form three" id="frameworkForm">
+<input name="code" value="{{fa.code}}" placeholder="N.º / código do Acordo-Quadro" required>
+<input name="object" value="{{fa.object}}" placeholder="Objecto do Acordo-Quadro" required>
+<select name="procedure_type" required>{% for p in procedures %}<option value="{{p}}" {% if fa.procedure_type==p %}selected{% endif %}>{{p}}</option>{% endfor %}</select>
+<label>Início<input name="start_date" type="date" value="{{fa.start_date or ''}}"></label>
+<label>Fim<input name="end_date" type="date" value="{{fa.end_date or ''}}"></label>
+<input name="estimated_value" type="number" step="0.01" min="0" value="{{fa.estimated_value or 0}}" placeholder="Valor estimado / limite (Kz)">
+<input name="document_ref" value="{{fa.document_ref or ''}}" placeholder="Referência do documento / arquivo">
+<input name="legal_basis" value="{{fa.legal_basis or ''}}" placeholder="Fundamento legal">
+<select name="status"><option {% if fa.status=='Em vigor' %}selected{% endif %}>Em vigor</option><option {% if fa.status=='Por regularizar' %}selected{% endif %}>Por regularizar</option><option {% if fa.status=='Concluído' %}selected{% endif %}>Concluído</option><option {% if fa.status=='Expirado' %}selected{% endif %}>Expirado</option><option {% if fa.status=='Suspenso' %}selected{% endif %}>Suspenso</option></select>
+<div class="section-title">Fornecedores participantes</div>
+<div style="grid-column:1/-1"><input id="supplierSearch" placeholder="Pesquisar fornecedor..." style="margin-bottom:10px;width:100%"><div style="max-height:260px;overflow:auto;border:1px solid #dbe3ef;border-radius:8px;padding:10px">{% for s in suppliers %}<label class="check framework-supplier" data-name="{{s.name|lower}}"><input type="checkbox" name="supplier_ids" value="{{s.id}}" {% if s in fa.suppliers.all() %}checked{% endif %}> {{s.name}}{% if s.nif %} — {{s.nif}}{% endif %}</label>{% endfor %}</div></div>
+<textarea name="notes" placeholder="Observações">{{fa.notes or ''}}</textarea>
+<div style="display:flex;gap:10px;grid-column:1/-1"><button>Guardar alterações</button><a class="button secondary" href="/framework-agreements">Cancelar</a></div>
+</form></div>
+<div class="panel"><h2>Contratos associados</h2><p class="muted">{{fa.contracts|length}} contrato(s) associado(s).</p>{% if fa.contracts %}<table><tr><th>Contrato</th><th>Fornecedor</th><th>Início</th><th>Fim</th><th>Estado</th></tr>{% for c in fa.contracts %}<tr><td>{{c.code}}</td><td>{{c.supplier.name if c.supplier else '—'}}</td><td>{{c.start_date or '—'}}</td><td>{{c.end_date or '—'}}</td><td>{{c.status}}</td></tr>{% endfor %}</table>{% else %}<p class="empty">Ainda não existem contratos associados.</p>{% endif %}</div>
+<script>document.getElementById('supplierSearch').addEventListener('input',function(){const q=this.value.toLowerCase();document.querySelectorAll('.framework-supplier').forEach(x=>x.style.display=x.dataset.name.includes(q)?'flex':'none')});</script>
+{% endblock %}

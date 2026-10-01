@@ -1234,6 +1234,55 @@ def framework_agreements():
     rows=FrameworkAgreement.query.order_by(FrameworkAgreement.id.desc()).all()
     return render_template("framework_agreements.html", rows=rows, suppliers=suppliers_list)
 
+@app.route("/framework-agreements/<int:fa_id>/edit", methods=["GET", "POST"])
+@login_required
+def edit_framework_agreement(fa_id):
+    fa = db.session.get(FrameworkAgreement, fa_id)
+    if not fa:
+        flash("Acordo-Quadro não encontrado.")
+        return redirect(url_for("framework_agreements"))
+    suppliers_list = Supplier.query.order_by(Supplier.name).all()
+    if request.method == "POST":
+        try:
+            code = request.form["code"].strip()
+            duplicate = FrameworkAgreement.query.filter(FrameworkAgreement.code == code, FrameworkAgreement.id != fa.id).first()
+            if duplicate:
+                raise ValueError("Já existe outro Acordo-Quadro com este número/código.")
+
+            selected_ids = {int(sid) for sid in request.form.getlist("supplier_ids") if str(sid).isdigit()}
+            if not selected_ids:
+                raise ValueError("Associe pelo menos um fornecedor ao Acordo-Quadro.")
+
+            current_ids = {s.id for s in fa.suppliers.all()}
+            removed_ids = current_ids - selected_ids
+            if removed_ids:
+                blocked = []
+                for c in fa.contracts:
+                    if c.supplier_id in removed_ids:
+                        blocked.append(c.supplier.name if c.supplier else f"Fornecedor #{c.supplier_id}")
+                if blocked:
+                    raise ValueError("Não é possível retirar fornecedor(es) que já possuem contratos associados a este Acordo-Quadro: " + ", ".join(sorted(set(blocked))) + ".")
+
+            fa.code = code
+            fa.object = request.form["object"].strip()
+            fa.procedure_type = request.form.get("procedure_type") or "Concurso Limitado por Convite"
+            fa.start_date = parse_date(request.form.get("start_date"), None)
+            fa.end_date = parse_date(request.form.get("end_date"), None)
+            fa.estimated_value = num(request.form.get("estimated_value"))
+            fa.status = request.form.get("status") or "Em vigor"
+            fa.legal_basis = request.form.get("legal_basis")
+            fa.document_ref = request.form.get("document_ref")
+            fa.notes = request.form.get("notes")
+            fa.suppliers = [s for s in suppliers_list if s.id in selected_ids]
+            db.session.commit()
+            flash(f"Acordo-Quadro {fa.code} actualizado com sucesso.")
+            return redirect(url_for("framework_agreements"))
+        except Exception as e:
+            db.session.rollback()
+            flash("Erro ao actualizar Acordo-Quadro: " + str(e))
+    procedures = ["Concurso Limitado por Convite", "Concurso Público", "Contratação Simplificada", "Concurso Limitado por Prévia Qualificação", "Procedimento de Contratação Emergencial"]
+    return render_template("framework_agreement_edit.html", fa=fa, suppliers=suppliers_list, procedures=procedures)
+
 @app.route("/contracts", methods=["GET", "POST"])
 @login_required
 def contracts():
