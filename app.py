@@ -1045,6 +1045,39 @@ def dashboard():
     suppliers = Supplier.query.count()
     recent_payments = SupplierPayment.query.order_by(SupplierPayment.id.desc()).limit(8).all()
     recent_contracts = Contract.query.order_by(Contract.end_date).limit(6).all()
+
+    # Execution of contracts: current contractual value vs invoices linked to each contract.
+    contract_execution = []
+    for c in Contract.query.order_by(Contract.end_date).all():
+        total_value = money(c.current_value)
+        executed = money(db.session.query(func.coalesce(func.sum(SupplierInvoice.total), 0)).filter(SupplierInvoice.contract_id == c.id).scalar())
+        paid = money(db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).filter(SupplierPayment.contract_id == c.id).scalar())
+        remaining = max(total_value - executed, 0)
+        execution_pct = (executed / total_value * 100) if total_value else 0
+        contract_execution.append({"obj": c, "total": total_value, "executed": executed, "paid": paid, "remaining": remaining, "execution": execution_pct})
+
+    # Execution of Acordos-Quadro: estimated/limit value vs all invoices carrying
+    # the framework relation (including invoices that came through linked contracts).
+    framework_execution = []
+    for fa in FrameworkAgreement.query.order_by(FrameworkAgreement.code).all():
+        total_value = money(fa.estimated_value)
+        executed = money(db.session.query(func.coalesce(func.sum(SupplierInvoice.total), 0)).filter(SupplierInvoice.framework_agreement_id == fa.id).scalar())
+        paid = money(db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).filter(SupplierPayment.framework_agreement_id == fa.id).scalar())
+        remaining = max(total_value - executed, 0)
+        execution_pct = (executed / total_value * 100) if total_value else 0
+        framework_execution.append({"obj": fa, "total": total_value, "executed": executed, "paid": paid, "remaining": remaining, "execution": execution_pct})
+
+    # Company/supplier analysis: consolidates contractual and financial execution per company.
+    company_analysis = []
+    for s in Supplier.query.order_by(Supplier.name).all():
+        contract_value = money(db.session.query(func.coalesce(func.sum(Contract.current_value), 0)).filter(Contract.supplier_id == s.id).scalar())
+        invoiced = money(db.session.query(func.coalesce(func.sum(SupplierInvoice.total), 0)).filter(SupplierInvoice.supplier_id == s.id).scalar())
+        paid = money(db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).filter(SupplierPayment.supplier_id == s.id).scalar())
+        fa_count = db.session.query(func.count(func.distinct(framework_supplier.c.framework_id))).filter(framework_supplier.c.supplier_id == s.id).scalar() or 0
+        contract_count = Contract.query.filter_by(supplier_id=s.id).count()
+        execution_pct = (invoiced / contract_value * 100) if contract_value else 0
+        company_analysis.append({"obj": s, "framework_count": int(fa_count), "contract_count": contract_count, "contract_value": contract_value,
+                                 "invoiced": invoiced, "paid": paid, "payable": max(invoiced-paid,0), "execution": min(max(execution_pct,0),100)})
     monthly = db.session.query(func.extract("year", SupplierPayment.date).label("y"), func.extract("month", SupplierPayment.date).label("m"), func.sum(SupplierPayment.amount).label("v")).group_by("y","m").order_by("y","m").all()
     months = [{"label": f"{int(r.y):04d}-{int(r.m):02d}", "value": float(r.v or 0)} for r in monthly]
     maxv = max([m["value"] for m in months], default=0)
@@ -1054,7 +1087,8 @@ def dashboard():
     return render_template("dashboard.html", total_invoices=total_invoices, total_paid=total_paid, payable=payable,
                            overdue=overdue, contracts_active=contracts_active, framework_agreements_active=framework_agreements_active, expiring=expiring,
                            critical_alerts=critical_alerts, alert_count=alert_count, suppliers=suppliers,
-                           recent_payments=recent_payments, recent_contracts=recent_contracts, months=months, latest_backup=latest_backup)
+                           recent_payments=recent_payments, recent_contracts=recent_contracts, contract_execution=contract_execution, framework_execution=framework_execution,
+                           company_analysis=company_analysis, months=months, latest_backup=latest_backup)
 
 # -----------------------------------------------------------------------------
 # Suppliers
@@ -1072,6 +1106,78 @@ def suppliers():
         except Exception as e:
             db.session.rollback(); flash("Não foi possível criar o fornecedor: "+str(e))
     return render_template("suppliers.html", rows=Supplier.query.order_by(Supplier.name).all())
+
+# -----------------------------------------------------------------------------
+# Supplier/company analysis
+# -----------------------------------------------------------------------------
+@app.route("/supplier-analysis")
+@login_required
+def supplier_analysis():
+    suppliers_list = Supplier.query.order_by(Supplier.name).all()
+    selected_id = request.args.get("supplier_id", type=int)
+    selected = db.session.get(Supplier, selected_id) if selected_id else None
+    companies = []
+    for s in suppliers_list:
+        contract_count = Contract.query.filter_by(supplier_id=s.id).count()
+        active_contract_count = Contract.query.filter_by(supplier_id=s.id, status="Em vigor").count()
+        contract_value = money(db.session.query(func.coalesce(func.sum(Contract.current_value), 0)).filter(Contract.supplier_id == s.id).scalar())
+        invoiced = money(db.session.query(func.coalesce(func.sum(SupplierInvoice.total), 0)).filter(SupplierInvoice.supplier_id == s.id).scalar())
+        paid = money(db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).filter(SupplierPayment.supplier_id == s.id).scalar())
+        payable = max(invoiced - paid, 0)
+        execution = (invoiced / contract_value * 100) if contract_value else 0
+        execution = min(max(execution, 0), 100)
+        fa_count = db.session.query(func.count(func.distinct(framework_supplier.c.framework_id))).filter(framework_supplier.c.supplier_id == s.id).scalar() or 0
+        companies.append({"obj": s, "framework_count": int(fa_count), "contract_count": contract_count, "active_contract_count": active_contract_count,
+                          "contract_value": contract_value, "invoiced": invoiced, "paid": paid, "payable": payable, "execution": execution})
+    selected_detail = None
+    if selected:
+        companies = [c for c in companies if c["obj"].id == selected.id]
+        # Complete analytical profile for the selected company.
+        detail_frameworks = []
+        for fa in selected.framework_agreements:
+            fa_invoiced = money(db.session.query(func.coalesce(func.sum(SupplierInvoice.total), 0)).filter(
+                SupplierInvoice.supplier_id == selected.id, SupplierInvoice.framework_agreement_id == fa.id).scalar())
+            fa_paid = money(db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).filter(
+                SupplierPayment.supplier_id == selected.id, SupplierPayment.framework_agreement_id == fa.id).scalar())
+            fa_total = money(fa.estimated_value)
+            fa_remaining = max(fa_total - fa_invoiced, 0)
+            fa_exec = (fa_invoiced / fa_total * 100) if fa_total else 0
+            detail_frameworks.append({"obj": fa, "total": fa_total, "invoiced": fa_invoiced, "paid": fa_paid,
+                                     "remaining": fa_remaining, "execution": min(max(fa_exec, 0), 100)})
+
+        detail_contracts = []
+        for c in Contract.query.filter_by(supplier_id=selected.id).order_by(Contract.end_date, Contract.number).all():
+            c_total = money(c.current_value)
+            c_invoiced = money(db.session.query(func.coalesce(func.sum(SupplierInvoice.total), 0)).filter(SupplierInvoice.contract_id == c.id).scalar())
+            c_paid = money(db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).filter(SupplierPayment.contract_id == c.id).scalar())
+            c_remaining = max(c_total - c_invoiced, 0)
+            c_exec = (c_invoiced / c_total * 100) if c_total else 0
+            detail_contracts.append({"obj": c, "total": c_total, "invoiced": c_invoiced, "paid": c_paid,
+                                     "remaining": c_remaining, "execution": min(max(c_exec, 0), 100)})
+
+        detail_invoices = SupplierInvoice.query.filter_by(supplier_id=selected.id).order_by(SupplierInvoice.issue_date.desc(), SupplierInvoice.id.desc()).all()
+        detail_payments = SupplierPayment.query.filter_by(supplier_id=selected.id).order_by(SupplierPayment.date.desc(), SupplierPayment.id.desc()).all()
+        selected_detail = {
+            "supplier": selected,
+            "frameworks": detail_frameworks,
+            "contracts": detail_contracts,
+            "invoices": detail_invoices,
+            "payments": detail_payments,
+            "invoice_total": money(sum((float(i.total or 0) for i in detail_invoices), 0)),
+            "invoice_paid": money(sum((float(i.paid or 0) for i in detail_invoices), 0)),
+            "payment_total": money(sum((float(x.amount or 0) for x in detail_payments), 0)),
+        }
+        selected_detail["invoice_balance"] = max(selected_detail["invoice_total"] - selected_detail["payment_total"], 0)
+    totals = {
+        "companies": len(companies),
+        "contracts": sum(c["contract_count"] for c in companies),
+        "contract_value": sum(c["contract_value"] for c in companies),
+        "invoiced": sum(c["invoiced"] for c in companies),
+        "paid": sum(c["paid"] for c in companies),
+    }
+    totals["payable"] = max(totals["invoiced"] - totals["paid"], 0)
+    totals["execution"] = (totals["invoiced"] / totals["contract_value"] * 100) if totals["contract_value"] else 0
+    return render_template("supplier_analysis.html", companies=companies, suppliers=suppliers_list, selected=selected, totals=totals, selected_detail=selected_detail)
 
 # -----------------------------------------------------------------------------
 # Supplier invoices and payments

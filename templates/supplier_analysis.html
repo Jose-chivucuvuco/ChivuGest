@@ -1,0 +1,66 @@
+{% extends "base.html" %}{% block content %}
+<div class="pagehead"><div><h1>Análise por empresas</h1><p class="muted">Consolide Acordos-Quadro, contratos, faturação e pagamentos por empresa fornecedora para facilitar a análise de execução.</p></div><div class="actions"><a class="btn secondary" href="/suppliers">Fornecedores</a><a class="btn secondary" href="/">Dashboard</a></div></div>
+<div class="panel">
+<form method="get" class="form three">
+<select name="supplier_id"><option value="">Todas as empresas</option>{% for s in suppliers %}<option value="{{s.id}}" {% if selected and selected.id==s.id %}selected{% endif %}>{{s.name}}</option>{% endfor %}</select>
+<div class="form-help">Selecione uma empresa para abrir a ficha analítica completa. A análise mostra os Acordos-Quadro, contratos, faturas, pagamentos, saldos e execução individual.</div>
+<button>Ver ficha da empresa</button>
+</form></div>
+<div class="cards six">
+<div class="metric"><small>EMPRESAS</small><strong>{{totals.companies}}</strong><span>na análise</span></div>
+<div class="metric"><small>CONTRATOS</small><strong>{{totals.contracts}}</strong><span>registados</span></div>
+<div class="metric"><small>VALOR CONTRATUAL</small><strong>Kz {{"{:,.2f}".format(totals.contract_value)}}</strong><span>valor actual</span></div>
+<div class="metric"><small>FATURADO</small><strong>Kz {{"{:,.2f}".format(totals.invoiced)}}</strong><span>execução lançada</span></div>
+<div class="metric"><small>PAGO</small><strong>Kz {{"{:,.2f}".format(totals.paid)}}</strong><span>pagamentos</span></div>
+<div class="metric"><small>POR PAGAR</small><strong>Kz {{"{:,.2f}".format(totals.payable)}}</strong><span>saldo financeiro</span></div>
+</div>
+<div class="panel" style="margin-top:16px"><div class="panelhead"><h2>Comparativo por empresa</h2><span>Execução média ponderada: <b>{{"{:.2f}".format(totals.execution)}}%</b></span></div>
+<table><tr><th>Empresa</th><th>Acordos-Quadro</th><th>Contratos</th><th>Valor contratual</th><th>Faturado</th><th>Pago</th><th>Por pagar</th><th>Execução</th></tr>
+{% for row in companies %}<tr><td><a href="/supplier-analysis?supplier_id={{row.obj.id}}"><b>{{row.obj.name}}</b></a>{% if row.obj.nif %}<br><small>NIF: {{row.obj.nif}}</small>{% endif %}</td><td>{{row.framework_count}}</td><td>{{row.contract_count}}</td><td>Kz {{"{:,.2f}".format(row.contract_value)}}</td><td>Kz {{"{:,.2f}".format(row.invoiced)}}</td><td>Kz {{"{:,.2f}".format(row.paid)}}</td><td>Kz {{"{:,.2f}".format(row.payable)}}</td><td><b>{{"{:.2f}".format(row.execution)}}%</b><div class="progress" style="margin-top:6px"><span style="width:{{[row.execution,100]|min}}%"></span></div></td></tr>
+{% else %}<tr><td colspan="8" class="empty">Nenhuma empresa encontrada.</td></tr>{% endfor %}</table></div>
+
+{% if selected_detail %}
+<div class="panel company-profile" style="margin-top:16px">
+  <div class="panelhead">
+    <div><h2>Ficha analítica — {{selected_detail.supplier.name}}</h2><span class="muted">{% if selected_detail.supplier.nif %}NIF: {{selected_detail.supplier.nif}} · {% endif %}Visão consolidada da relação comercial e execução financeira.</span></div>
+    <a class="btn secondary" href="/supplier-analysis">Voltar à visão geral</a>
+  </div>
+
+  <div class="cards six company-metrics">
+    <div class="metric"><small>ACORDOS-QUADRO</small><strong>{{selected_detail.frameworks|length}}</strong><span>participações</span></div>
+    <div class="metric"><small>CONTRATOS</small><strong>{{selected_detail.contracts|length}}</strong><span>registados</span></div>
+    <div class="metric"><small>FATURAS</small><strong>{{selected_detail.invoices|length}}</strong><span>documentos</span></div>
+    <div class="metric"><small>FATURADO</small><strong>Kz {{"{:,.2f}".format(selected_detail.invoice_total)}}</strong><span>valor lançado</span></div>
+    <div class="metric"><small>PAGO</small><strong>Kz {{"{:,.2f}".format(selected_detail.payment_total)}}</strong><span>pagamentos</span></div>
+    <div class="metric"><small>SALDO</small><strong>Kz {{"{:,.2f}".format(selected_detail.invoice_balance)}}</strong><span>faturado menos pago</span></div>
+  </div>
+
+  <div class="grid2" style="margin-top:16px">
+    <div class="panel nested-panel">
+      <div class="panelhead"><h2>Acordos-Quadro da empresa</h2><span>{{selected_detail.frameworks|length}} registo(s)</span></div>
+      <table><tr><th>Acordo</th><th>Valor limite</th><th>Faturado</th><th>Pago</th><th>Por executar</th><th>Execução</th></tr>
+      {% for row in selected_detail.frameworks %}<tr><td><b>{{row.obj.code}}</b><br><small>{{row.obj.object}}</small><br><span class="badge {% if row.obj.status=='Em vigor' %}green{% else %}amber{% endif %}">{{row.obj.status}}</span></td><td>Kz {{"{:,.2f}".format(row.total)}}</td><td>Kz {{"{:,.2f}".format(row.invoiced)}}</td><td>Kz {{"{:,.2f}".format(row.paid)}}</td><td>Kz {{"{:,.2f}".format(row.remaining)}}</td><td><b>{{"{:.2f}".format(row.execution)}}%</b><div class="progress"><span style="width:{{[row.execution,100]|min}}%"></span></div></td></tr>{% else %}<tr><td colspan="6" class="empty">A empresa não está associada a nenhum Acordo-Quadro.</td></tr>{% endfor %}</table>
+    </div>
+    <div class="panel nested-panel">
+      <div class="panelhead"><h2>Contratos da empresa</h2><span>{{selected_detail.contracts|length}} registo(s)</span></div>
+      <table><tr><th>Contrato</th><th>Acordo-Quadro</th><th>Valor</th><th>Faturado</th><th>Pago</th><th>Por executar</th><th>Execução</th></tr>
+      {% for row in selected_detail.contracts %}<tr><td><b>{{row.obj.number}}</b><br><small>{{row.obj.object}}</small><br><span class="badge {% if row.obj.status=='Em vigor' %}green{% else %}amber{% endif %}">{{row.obj.status}}</span></td><td>{% if row.obj.framework_agreement %}{{row.obj.framework_agreement.code}}{% else %}—{% endif %}</td><td>Kz {{"{:,.2f}".format(row.total)}}</td><td>Kz {{"{:,.2f}".format(row.invoiced)}}</td><td>Kz {{"{:,.2f}".format(row.paid)}}</td><td>Kz {{"{:,.2f}".format(row.remaining)}}</td><td><b>{{"{:.2f}".format(row.execution)}}%</b><div class="progress"><span style="width:{{[row.execution,100]|min}}%"></span></div></td></tr>{% else %}<tr><td colspan="7" class="empty">Nenhum contrato registado para esta empresa.</td></tr>{% endfor %}</table>
+    </div>
+  </div>
+
+  <div class="panel nested-panel" style="margin-top:16px">
+    <div class="panelhead"><h2>Faturas da empresa</h2><span>{{selected_detail.invoices|length}} registo(s)</span></div>
+    <table><tr><th>Fatura</th><th>Emissão</th><th>Acordo-Quadro</th><th>Contrato</th><th>Total</th><th>Pago</th><th>Saldo</th><th>Estado</th></tr>
+    {% for i in selected_detail.invoices %}<tr><td><b>{{i.number}}</b></td><td>{{i.issue_date.strftime('%d/%m/%Y') if i.issue_date else '—'}}</td><td>{% if i.framework_agreement %}{{i.framework_agreement.code}}{% else %}—{% endif %}</td><td>{% if i.contract %}{{i.contract.number}}{% else %}—{% endif %}</td><td>Kz {{"{:,.2f}".format(i.total or 0)}}</td><td>Kz {{"{:,.2f}".format(i.paid or 0)}}</td><td>Kz {{"{:,.2f}".format(max((i.total or 0)-(i.paid or 0),0))}}</td><td><span class="badge {% if i.status=='Pago' %}green{% elif i.status=='Pendente' %}amber{% else %}blue{% endif %}">{{i.status}}</span></td></tr>{% else %}<tr><td colspan="8" class="empty">Nenhuma fatura registada para esta empresa.</td></tr>{% endfor %}</table>
+  </div>
+
+  <div class="panel nested-panel" style="margin-top:16px">
+    <div class="panelhead"><h2>Pagamentos da empresa</h2><span>{{selected_detail.payments|length}} registo(s)</span></div>
+    <table><tr><th>Recibo</th><th>Data</th><th>Fatura</th><th>Acordo-Quadro</th><th>Contrato</th><th>Meio</th><th>Valor</th><th>Referência</th></tr>
+    {% for p in selected_detail.payments %}<tr><td><b>{{p.receipt}}</b></td><td>{{p.date.strftime('%d/%m/%Y') if p.date else '—'}}</td><td>{% if p.invoice %}{{p.invoice.number}}{% else %}—{% endif %}</td><td>{% if p.framework_agreement %}{{p.framework_agreement.code}}{% elif p.invoice and p.invoice.framework_agreement %}{{p.invoice.framework_agreement.code}}{% else %}—{% endif %}</td><td>{% if p.contract %}{{p.contract.number}}{% elif p.invoice and p.invoice.contract %}{{p.invoice.contract.number}}{% else %}—{% endif %}</td><td>{{p.method}}</td><td>Kz {{"{:,.2f}".format(p.amount or 0)}}</td><td>{{p.reference or '—'}}</td></tr>{% else %}<tr><td colspan="8" class="empty">Nenhum pagamento registado para esta empresa.</td></tr>{% endfor %}</table>
+  </div>
+</div>
+{% endif %}
+
+<div class="legal-note"><b>Leitura:</b> “Faturado” mede a execução financeira lançada por empresa; “Pago” mede os pagamentos efectivamente registados; “Saldo” é a diferença entre faturado e pago. A ficha da empresa permite descer do consolidado para cada Acordo-Quadro, contrato, fatura e pagamento.</div>
+{% endblock %}
