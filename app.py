@@ -1032,6 +1032,7 @@ def dashboard():
     overdue = db.session.query(func.coalesce(func.sum(SupplierInvoice.total - SupplierInvoice.paid), 0)).filter(
         SupplierInvoice.due_date < date.today(), SupplierInvoice.total > SupplierInvoice.paid).scalar() or 0
     contracts_active = Contract.query.filter_by(status="Em vigor").count()
+    framework_agreements_active = FrameworkAgreement.query.filter_by(status="Em vigor").count()
     expiring = Contract.query.filter(Contract.status == "Em vigor", Contract.end_date <= date.today()+timedelta(days=60), Contract.end_date >= date.today()).count()
     critical_alerts = ComplianceAlert.query.filter_by(resolved=False, severity="CRITICO").count()
     alert_count = ComplianceAlert.query.filter_by(resolved=False).count()
@@ -1045,7 +1046,7 @@ def dashboard():
     run_compliance_checks()
     latest_backup = BackupRecord.query.order_by(BackupRecord.created_at.desc()).first()
     return render_template("dashboard.html", total_invoices=total_invoices, total_paid=total_paid, payable=payable,
-                           overdue=overdue, contracts_active=contracts_active, expiring=expiring,
+                           overdue=overdue, contracts_active=contracts_active, framework_agreements_active=framework_agreements_active, expiring=expiring,
                            critical_alerts=critical_alerts, alert_count=alert_count, suppliers=suppliers,
                            recent_payments=recent_payments, recent_contracts=recent_contracts, months=months, latest_backup=latest_backup)
 
