@@ -1,36 +1,46 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="pagehead">
-  <div><h1>Faturas</h1><p class="muted">Registo simples de faturas de fornecedores e controlo automático de saldo.</p></div>
+  <div><h1>Faturas</h1><p class="muted">Registo de faturas com rastreabilidade ao fornecedor, Acordo-Quadro, contrato e pagamentos.</p></div>
   <a class="btn secondary" href="/import">Importar faturas</a>
 </div>
 
 <div class="panel">
   <h2>Registar fatura</h2>
-  <form method="post" class="form three">
+  <form method="post" class="form three" id="invoiceForm">
     <input name="number" placeholder="N.º da fatura" required>
-    <select name="supplier_id" required>
+    <select name="supplier_id" id="invoiceSupplier" required>
       <option value="">Fornecedor</option>
       {% for s in suppliers %}<option value="{{s.id}}">{{s.name}}</option>{% endfor %}
     </select>
-    <select name="contract_id">
+    <select name="framework_agreement_id" id="invoiceFramework">
+      <option value="">Acordo-Quadro (opcional)</option>
+      {% for fa in framework_agreements %}
+      <option value="{{fa.id}}" data-suppliers="{% for s in fa.suppliers.all() %}{{s.id}}{% if not loop.last %},{% endif %}{% endfor %}">{{fa.code}} — {{fa.object|truncate(65)}}</option>
+      {% endfor %}
+    </select>
+    <select name="contract_id" id="invoiceContract">
       <option value="">Contrato (opcional)</option>
-      {% for c in contracts %}<option value="{{c.id}}">{{c.number}} — {{c.supplier.name}}</option>{% endfor %}
+      {% for c in contracts %}
+      <option value="{{c.id}}" data-supplier="{{c.supplier_id}}" data-framework="{{c.framework_agreement_id or ''}}">{{c.number}} — {{c.supplier.name}}{% if c.framework_agreement %} — {{c.framework_agreement.code}}{% endif %}</option>
+      {% endfor %}
     </select>
     <label>Data de emissão<input name="issue_date" type="date" required></label>
     <input name="total" type="number" step="0.01" min="0.01" placeholder="Valor da fatura (Kz)" required>
     <button>Guardar fatura</button>
   </form>
-  <div class="form-help">O valor pago e o saldo são controlados pelo módulo <b>Pagamentos</b>. Subtotal, IVA e vencimento não são solicitados neste registo simplificado.</div>
+  <div class="form-help"><b>Rastreabilidade:</b> seleccione o fornecedor e, se aplicável, o Acordo-Quadro e/ou contrato. Ao escolher um contrato, o Acordo-Quadro correspondente é identificado automaticamente. O pagamento herdará esta relação.</div>
 </div>
 
 <div class="panel">
   <table>
-    <tr><th>Fatura</th><th>Fornecedor</th><th>Contrato</th><th>Emissão</th><th>Total</th><th>Pago</th><th>Saldo</th><th>Estado</th>{% if session.role=='admin' %}<th>Ações</th>{% endif %}</tr>
+    <tr><th>Fatura</th><th>Fornecedor</th><th>Acordo-Quadro</th><th>Contrato</th><th>Emissão</th><th>Total</th><th>Pago</th><th>Saldo</th><th>Estado</th>{% if session.role=='admin' %}<th>Ações</th>{% endif %}</tr>
     {% for i in rows %}
     <tr>
       <td><b>{{i.number}}</b>{% if i.source_filename %}<br><small>Importada: {{i.source_filename}}</small>{% endif %}</td>
-      <td>{{i.supplier.name}}</td><td>{{i.contract.number if i.contract else '—'}}</td>
+      <td>{{i.supplier.name}}</td>
+      <td>{{i.framework_agreement.code if i.framework_agreement else (i.contract.framework_agreement.code if i.contract and i.contract.framework_agreement else '—')}}</td>
+      <td>{{i.contract.number if i.contract else '—'}}</td>
       <td>{{i.issue_date}}</td>
       <td>Kz {{"{:,.2f}".format(i.total or 0)}}</td>
       <td>Kz {{"{:,.2f}".format(i.paid or 0)}}</td>
@@ -38,7 +48,25 @@
       <td>{% if i.status=='Paga' %}<span class="badge green">Paga</span>{% elif i.status=='Parcial' %}<span class="badge amber">Parcial</span>{% else %}<span class="badge">Pendente</span>{% endif %}</td>
       {% if session.role=='admin' %}<td><a class="btn small secondary" href="/admin/edit/supplier_invoice/{{i.id}}">Editar</a> <form method="post" action="/admin/delete/supplier_invoice/{{i.id}}" style="display:inline" onsubmit="return confirm('Eliminar esta fatura?')"><button class="btn small danger">Eliminar</button></form></td>{% endif %}
     </tr>
-    {% else %}<tr><td colspan="9" class="empty">Nenhuma fatura registada.</td></tr>{% endfor %}
+    {% else %}<tr><td colspan="10" class="empty">Nenhuma fatura registada.</td></tr>{% endfor %}
   </table>
 </div>
+<script>
+(function(){
+  const supplier=document.getElementById('invoiceSupplier'), fa=document.getElementById('invoiceFramework'), contract=document.getElementById('invoiceContract');
+  if(!supplier||!fa||!contract)return;
+  const faOptions=[...fa.options], contractOptions=[...contract.options];
+  function filter(){
+    const sid=supplier.value, fid=fa.value;
+    faOptions.forEach((o,i)=>{ if(i===0){o.hidden=false;return;} const ids=(o.dataset.suppliers||'').split(',').filter(Boolean); o.hidden=!!sid && !ids.includes(sid); });
+    if(fa.selectedOptions[0] && fa.selectedOptions[0].hidden) fa.value='';
+    const currentFa=fa.value;
+    contractOptions.forEach((o,i)=>{ if(i===0){o.hidden=false;return;} const okSupplier=!sid||o.dataset.supplier===sid; const okFa=!currentFa||o.dataset.framework===currentFa; o.hidden=!(okSupplier&&okFa); });
+    if(contract.selectedOptions[0] && contract.selectedOptions[0].hidden) contract.value='';
+    const c=contract.selectedOptions[0];
+    if(c && c.value && c.dataset.framework){ fa.value=c.dataset.framework; }
+  }
+  supplier.addEventListener('change',filter); fa.addEventListener('change',filter); contract.addEventListener('change',filter); filter();
+})();
+</script>
 {% endblock %}

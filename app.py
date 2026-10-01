@@ -187,6 +187,7 @@ class SupplierInvoice(db.Model):
     number = db.Column(db.String(100), nullable=False, index=True)
     supplier_id = db.Column(db.Integer, db.ForeignKey("supplier.id"), nullable=False)
     contract_id = db.Column(db.Integer, db.ForeignKey("contract.id"))
+    framework_agreement_id = db.Column(db.Integer, db.ForeignKey("framework_agreement.id"))
     issue_date = db.Column(db.Date, nullable=False)
     due_date = db.Column(db.Date)
     subtotal = db.Column(db.Numeric(18,2), default=0)
@@ -203,6 +204,7 @@ class SupplierInvoice(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     supplier = db.relationship("Supplier", backref="invoices")
     contract = db.relationship("Contract", backref="invoices")
+    framework_agreement = db.relationship("FrameworkAgreement", backref="invoices")
 
 class SupplierPayment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -210,6 +212,7 @@ class SupplierPayment(db.Model):
     supplier_id = db.Column(db.Integer, db.ForeignKey("supplier.id"), nullable=False)
     invoice_id = db.Column(db.Integer, db.ForeignKey("supplier_invoice.id"))
     contract_id = db.Column(db.Integer, db.ForeignKey("contract.id"))
+    framework_agreement_id = db.Column(db.Integer, db.ForeignKey("framework_agreement.id"))
     date = db.Column(db.Date, nullable=False)
     method = db.Column(db.String(60), nullable=False)
     amount = db.Column(db.Numeric(18,2), nullable=False)
@@ -218,6 +221,7 @@ class SupplierPayment(db.Model):
     supplier = db.relationship("Supplier", backref="payments")
     invoice = db.relationship("SupplierInvoice", backref="payments")
     contract = db.relationship("Contract", backref="payments")
+    framework_agreement = db.relationship("FrameworkAgreement", backref="payments")
 
 class PaymentOrder(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -225,6 +229,7 @@ class PaymentOrder(db.Model):
     supplier_id = db.Column(db.Integer, db.ForeignKey("supplier.id"), nullable=False)
     invoice_id = db.Column(db.Integer, db.ForeignKey("supplier_invoice.id"))
     contract_id = db.Column(db.Integer, db.ForeignKey("contract.id"))
+    framework_agreement_id = db.Column(db.Integer, db.ForeignKey("framework_agreement.id"))
     issue_date = db.Column(db.Date)
     amount = db.Column(db.Numeric(18,2), default=0)
     status = db.Column(db.String(50), default="Pendente")
@@ -239,6 +244,7 @@ class PaymentOrder(db.Model):
     supplier = db.relationship("Supplier", backref="payment_orders")
     invoice = db.relationship("SupplierInvoice", backref="payment_orders")
     contract = db.relationship("Contract", backref="payment_orders")
+    framework_agreement = db.relationship("FrameworkAgreement", backref="payment_orders")
 
 class SourceDocument(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -1075,6 +1081,7 @@ def suppliers():
 def supplier_invoices():
     suppliers_list = Supplier.query.order_by(Supplier.name).all()
     contracts = Contract.query.filter_by(status="Em vigor").order_by(Contract.number).all()
+    framework_agreements = FrameworkAgreement.query.order_by(FrameworkAgreement.code).all()
     if request.method == "POST":
         try:
             supplier = db.session.get(Supplier, int(request.form["supplier_id"]))
@@ -1083,22 +1090,40 @@ def supplier_invoices():
             total = num(request.form["total"])
             if total <= 0:
                 raise ValueError("O valor da fatura deve ser superior a zero.")
-            # Paid is controlled by the Payments module, not manually entered on the invoice.
+
+            contract = db.session.get(Contract, int(request.form["contract_id"])) if request.form.get("contract_id") else None
+            framework_id = int(request.form["framework_agreement_id"]) if request.form.get("framework_agreement_id") else None
+            framework = db.session.get(FrameworkAgreement, framework_id) if framework_id else None
+
+            # Contract is the strongest link: inherit its supplier and Acordo-Quadro.
+            if contract:
+                if contract.supplier_id != supplier.id:
+                    raise ValueError("O fornecedor da fatura não corresponde ao fornecedor do contrato seleccionado.")
+                contract_framework_id = contract.framework_agreement_id
+                if framework_id and framework_id != contract_framework_id:
+                    raise ValueError("O Acordo-Quadro seleccionado não corresponde ao contrato.")
+                framework_id = contract_framework_id
+                framework = contract.framework_agreement
+
+            if framework:
+                participating_supplier_ids = {s.id for s in framework.suppliers.all()}
+                if supplier.id not in participating_supplier_ids:
+                    raise ValueError("O fornecedor seleccionado não participa no Acordo-Quadro indicado.")
+
             inv = SupplierInvoice(
                 number=request.form["number"].strip(),
                 supplier_id=supplier.id,
-                contract_id=int(request.form["contract_id"]) if request.form.get("contract_id") else None,
+                contract_id=contract.id if contract else None,
+                framework_agreement_id=framework_id,
                 issue_date=parse_date(request.form.get("issue_date")),
-                # Due date, subtotal, VAT and currency remain in the database for legacy/import
-                # compatibility but are intentionally not requested in the simplified UI.
                 due_date=None, subtotal=0, vat=0, total=total, paid=0, currency="AOA",
                 status="Pendente", source_filename=request.form.get("source_filename"))
             db.session.add(inv); db.session.commit()
-            flash("Fatura registada. O valor pago será actualizado através do módulo Pagamentos.")
+            flash("Fatura registada. A relação com o Acordo-Quadro/contrato foi guardada e será herdada nos pagamentos.")
         except Exception as e:
             db.session.rollback(); flash("Erro ao registar fatura: "+str(e))
     rows = SupplierInvoice.query.order_by(SupplierInvoice.id.desc()).all()
-    return render_template("supplier_invoices.html", rows=rows, suppliers=suppliers_list, contracts=contracts)
+    return render_template("supplier_invoices.html", rows=rows, suppliers=suppliers_list, contracts=contracts, framework_agreements=framework_agreements)
 
 @app.route("/payments", methods=["GET", "POST"])
 @login_required
@@ -1106,24 +1131,57 @@ def supplier_payments():
     suppliers_list = Supplier.query.order_by(Supplier.name).all()
     invoices = SupplierInvoice.query.order_by(SupplierInvoice.id.desc()).all()
     contracts = Contract.query.filter_by(status="Em vigor").all()
+    framework_agreements = FrameworkAgreement.query.order_by(FrameworkAgreement.code).all()
     if request.method == "POST":
         try:
             amount = num(request.form["amount"])
+            if amount <= 0:
+                raise ValueError("O valor do pagamento deve ser superior a zero.")
             inv = db.session.get(SupplierInvoice, int(request.form["invoice_id"])) if request.form.get("invoice_id") else None
-            supplier_id = int(request.form["supplier_id"])
+            supplier_id = int(request.form["supplier_id"]) if request.form.get("supplier_id") else None
+            contract = db.session.get(Contract, int(request.form["contract_id"])) if request.form.get("contract_id") else None
+            framework_id = int(request.form["framework_agreement_id"]) if request.form.get("framework_agreement_id") else None
+            framework = db.session.get(FrameworkAgreement, framework_id) if framework_id else None
+
+            # A selected invoice is the source of truth: supplier, contract and Acordo-Quadro
+            # are inherited automatically, preventing inconsistent manual combinations.
             if inv:
                 supplier_id = inv.supplier_id
+                if inv.contract_id:
+                    contract = inv.contract
+                framework_id = inv.framework_agreement_id
+                framework = inv.framework_agreement
+            elif contract:
+                supplier_id = contract.supplier_id
+                framework_id = contract.framework_agreement_id
+                framework = contract.framework_agreement
+
+            if not supplier_id:
+                raise ValueError("Seleccione o fornecedor ou uma fatura/contrato que permita identificá-lo.")
+            supplier = db.session.get(Supplier, supplier_id)
+            if not supplier:
+                raise ValueError("Fornecedor inválido.")
+            if framework:
+                if supplier.id not in {s.id for s in framework.suppliers.all()}:
+                    raise ValueError("O fornecedor seleccionado não participa no Acordo-Quadro indicado.")
+            if contract and contract.supplier_id != supplier.id:
+                raise ValueError("O contrato seleccionado não pertence ao fornecedor indicado.")
+            if contract and framework_id and contract.framework_agreement_id != framework_id:
+                raise ValueError("O contrato e o Acordo-Quadro seleccionados não correspondem entre si.")
+
+            if inv:
                 inv.paid = money(inv.paid) + amount
                 inv.status = "Paga" if inv.paid >= inv.total else "Parcial"
             p = SupplierPayment(receipt=request.form["receipt"], supplier_id=supplier_id,
                                 invoice_id=inv.id if inv else None,
-                                contract_id=int(request.form["contract_id"]) if request.form.get("contract_id") else None,
+                                contract_id=contract.id if contract else None,
+                                framework_agreement_id=framework_id,
                                 date=parse_date(request.form.get("date")), method=request.form["method"], amount=amount,
                                 reference=request.form.get("reference"), notes=request.form.get("notes"))
-            db.session.add(p); db.session.commit(); flash("Pagamento registado.")
+            db.session.add(p); db.session.commit(); flash("Pagamento registado com rastreabilidade ao Acordo-Quadro/contrato.")
         except Exception as e:
             db.session.rollback(); flash("Erro no pagamento: "+str(e))
-    return render_template("supplier_payments.html", rows=SupplierPayment.query.order_by(SupplierPayment.id.desc()).all(), orders=PaymentOrder.query.order_by(PaymentOrder.id.desc()).limit(200).all(), suppliers=suppliers_list, invoices=invoices, contracts=contracts)
+    return render_template("supplier_payments.html", rows=SupplierPayment.query.order_by(SupplierPayment.id.desc()).all(), orders=PaymentOrder.query.order_by(PaymentOrder.id.desc()).limit(200).all(), suppliers=suppliers_list, invoices=invoices, contracts=contracts, framework_agreements=framework_agreements)
 
 @app.route("/payments/import-documents", methods=["POST"])
 @login_required
@@ -1162,7 +1220,7 @@ def import_payment_documents():
                         supplier=Supplier(name=sname,nif=parsed.get("nif") or None,contracting_type="Outro / Regime especial")
                         db.session.add(supplier); db.session.flush()
                 doc=SourceDocument(document_type=source_type,document_number=parsed["os_number"],supplier_id=supplier.id,source_filename=f.filename,source_hash=parsed["hash"],issue_date=parsed["date_parsed"],amount=parsed["amount"],extracted_data=json.dumps(parsed,ensure_ascii=False),import_confidence=parsed["confidence"])
-                osr=PaymentOrder(os_number=parsed["os_number"],supplier_id=supplier.id,invoice_id=invoice.id if invoice else None,contract_id=contract.id if contract else None,issue_date=parsed["date_parsed"],amount=parsed["amount"],status=normalize_os_status(parsed["status"]),bank_reference=parsed["bank_reference"],source_type=source_type,source_filename=f.filename,source_hash=parsed["hash"],extracted_data=json.dumps(parsed,ensure_ascii=False),reconciliation_status=recon_status,reconciliation_notes=recon_notes)
+                osr=PaymentOrder(os_number=parsed["os_number"],supplier_id=supplier.id,invoice_id=invoice.id if invoice else None,contract_id=contract.id if contract else None,framework_agreement_id=(contract.framework_agreement_id if contract else (invoice.framework_agreement_id if invoice else None)),issue_date=parsed["date_parsed"],amount=parsed["amount"],status=normalize_os_status(parsed["status"]),bank_reference=parsed["bank_reference"],source_type=source_type,source_filename=f.filename,source_hash=parsed["hash"],extracted_data=json.dumps(parsed,ensure_ascii=False),reconciliation_status=recon_status,reconciliation_notes=recon_notes)
                 db.session.add_all([doc,osr]); created+=1
             db.session.commit()
         else:
@@ -1177,7 +1235,7 @@ def import_payment_documents():
                     supplier=Supplier(name=sname,nif=parsed.get("nif") or None,contracting_type="Outro / Regime especial")
                     db.session.add(supplier); db.session.flush()
             doc=SourceDocument(document_type=source_type,document_number=parsed.get("os_number") or parsed.get("invoice_number") or None,supplier_id=supplier.id,source_filename=parsed["filename"],source_hash=parsed["hash"],issue_date=parsed.get("date_parsed"),amount=parsed.get("amount",0),extracted_data=json.dumps(parsed,ensure_ascii=False),import_confidence=parsed.get("confidence",0))
-            osr=PaymentOrder(os_number=parsed.get("os_number") or parsed.get("invoice_number") or "SEM-NUMERO",supplier_id=supplier.id,invoice_id=invoice.id if invoice else None,contract_id=contract.id if contract else None,issue_date=parsed.get("date_parsed"),amount=parsed.get("amount",0),status=normalize_os_status(parsed.get("status")),bank_reference=parsed.get("bank_reference"),source_type=source_type,source_filename=parsed["filename"],source_hash=parsed["hash"],extracted_data=json.dumps(parsed,ensure_ascii=False),reconciliation_status=recon_status,reconciliation_notes=recon_notes)
+            osr=PaymentOrder(os_number=parsed.get("os_number") or parsed.get("invoice_number") or "SEM-NUMERO",supplier_id=supplier.id,invoice_id=invoice.id if invoice else None,contract_id=contract.id if contract else None,framework_agreement_id=(contract.framework_agreement_id if contract else (invoice.framework_agreement_id if invoice else None)),issue_date=parsed.get("date_parsed"),amount=parsed.get("amount",0),status=normalize_os_status(parsed.get("status")),bank_reference=parsed.get("bank_reference"),source_type=source_type,source_filename=parsed["filename"],source_hash=parsed["hash"],extracted_data=json.dumps(parsed,ensure_ascii=False),reconciliation_status=recon_status,reconciliation_notes=recon_notes)
             db.session.add_all([doc,osr]); created=1; db.session.commit()
         flash(f"Importação concluída: {created} documento(s)/ordem(ns) de saque. As informações foram cruzadas por fornecedor, NIF, fatura, valor e situação.")
     except Exception as e:
@@ -1405,9 +1463,9 @@ def reports():
 @login_required
 def report_export():
     out=io.StringIO(); w=csv.writer(out)
-    w.writerow(["Fornecedor","NIF","Contrato","Fatura","Data","Vencimento","Total","Pago","Saldo","Estado"])
+    w.writerow(["Fornecedor","NIF","Acordo-Quadro","Contrato","Fatura","Data","Vencimento","Total","Pago","Saldo","Estado"])
     for i in SupplierInvoice.query.order_by(SupplierInvoice.issue_date).all():
-        w.writerow([i.supplier.name,i.supplier.nif or "",i.contract.number if i.contract else "",i.number,i.issue_date.isoformat(),i.due_date.isoformat() if i.due_date else "",money(i.total),money(i.paid),money(i.total)-money(i.paid),i.status])
+        w.writerow([i.supplier.name,i.supplier.nif or "",i.framework_agreement.code if i.framework_agreement else (i.contract.framework_agreement.code if i.contract and i.contract.framework_agreement else ""),i.contract.number if i.contract else "",i.number,i.issue_date.isoformat(),i.due_date.isoformat() if i.due_date else "",money(i.total),money(i.paid),money(i.total)-money(i.paid),i.status])
     return Response("\ufeff"+out.getvalue(),mimetype="text/csv",headers={"Content-Disposition":"attachment; filename=chivugest_relatorio_fornecedores.csv"})
 
 # -----------------------------------------------------------------------------
@@ -1729,12 +1787,22 @@ def ensure_schema():
     add_column("procurement_procedure", "framework_agreement_id", "INTEGER")
     add_column("contract", "instrument_type", "VARCHAR(100)")
     add_column("contract", "framework_agreement_id", "INTEGER")
+    add_column("supplier_invoice", "framework_agreement_id", "INTEGER")
+    add_column("supplier_payment", "framework_agreement_id", "INTEGER")
+    add_column("payment_order", "framework_agreement_id", "INTEGER")
     add_column("supplier", "contracting_type", "VARCHAR(80)")
     # Existing suppliers remain valid; this field is now legacy and no longer used by the UI.
     with db.engine.begin() as conn:
         conn.execute(text("UPDATE supplier SET contracting_type='Não aplicável' WHERE contracting_type IS NULL OR contracting_type=''"))
         conn.execute(text("UPDATE procurement_procedure SET instrument_type='Contrato público' WHERE instrument_type IS NULL OR instrument_type=''"))
         conn.execute(text("UPDATE contract SET instrument_type='Contrato público' WHERE instrument_type IS NULL OR instrument_type=''"))
+        # Backfill the new traceability link for legacy records that already had a contract.
+        if "supplier_invoice" in inspect(db.engine).get_table_names():
+            conn.execute(text("UPDATE supplier_invoice SET framework_agreement_id=(SELECT framework_agreement_id FROM contract WHERE contract.id=supplier_invoice.contract_id) WHERE framework_agreement_id IS NULL AND contract_id IS NOT NULL"))
+        if "supplier_payment" in inspect(db.engine).get_table_names():
+            conn.execute(text("UPDATE supplier_payment SET framework_agreement_id=(SELECT framework_agreement_id FROM contract WHERE contract.id=supplier_payment.contract_id) WHERE framework_agreement_id IS NULL AND contract_id IS NOT NULL"))
+        if "payment_order" in inspect(db.engine).get_table_names():
+            conn.execute(text("UPDATE payment_order SET framework_agreement_id=(SELECT framework_agreement_id FROM contract WHERE contract.id=payment_order.contract_id) WHERE framework_agreement_id IS NULL AND contract_id IS NOT NULL"))
 
 def init_db():
     with app.app_context():
