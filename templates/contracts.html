@@ -10,9 +10,19 @@
     <option value="">Procedimento associado (opcional)</option>
     {% for p in procedures %}<option value="{{p.id}}" data-supplier="{{p.supplier_id or ''}}" data-object="{{p.object|e}}" data-category="{{p.contract_category}}" data-procedure="{{p.procedure_type}}" data-value="{{p.estimated_value or 0}}" data-cab="{{p.cabimentacao_ref or ''}}" data-cab-ok="{{'1' if p.cabimentado else '0'}}">{{p.code}} — {{p.object[:60]}}</option>{% endfor %}
   </select>
-  <select name="supplier_id" id="supplier_id" required><option value="">Fornecedor</option>{% for s in suppliers %}<option value="{{s.id}}">{{s.name}}</option>{% endfor %}</select>
+  <select name="supplier_id" id="supplier_id" required>
+    <option value="">Fornecedor</option>
+    {% for s in suppliers %}<option value="{{s.id}}">{{s.name}}</option>{% endfor %}
+  </select>
   <select name="instrument_type" id="instrument_type"><option value="Contrato público">Instrumento: Contrato público</option>{% for i in instrument_types %}{% if i != "Contrato público" %}<option value="{{i}}">Instrumento: {{i}}</option>{% endif %}{% endfor %}</select>
-  <select name="framework_agreement_id" id="framework_agreement_id"><option value="">Acordo-Quadro (se aplicável)</option>{% for fa in framework_agreements %}<option value="{{fa.id}}">{{fa.code}} — {{fa.object[:70]}}</option>{% endfor %}</select>
+  <select name="framework_agreement_id" id="framework_agreement_id">
+    <option value="">Acordo-Quadro (opcional)</option>
+    {% for fa in framework_agreements %}
+      <option value="{{fa.id}}" data-suppliers="{% for s in fa.suppliers.all() %}{{s.id}}{% if not loop.last %},{% endif %}{% endfor %}">
+        {{fa.code}} — {{fa.object[:70]}}
+      </option>
+    {% endfor %}
+  </select>
 
   <textarea name="object" id="contract_object" placeholder="Objecto" required></textarea>
   <select name="contract_type" id="contract_type" required>{% for c in contract_categories %}<option>{{c}}</option>{% endfor %}</select>
@@ -37,7 +47,12 @@
   <textarea name="notes" placeholder="Observações / condições especiais"></textarea>
   <button>Guardar e executar análise legal</button>
 </form>
-<p class="form-help">Ao seleccionar um procedimento, o ChivuGest preenche automaticamente fornecedor, objecto, categoria, tipo de procedimento, valor estimado e referência de cabimentação. Pode corrigir os dados antes de guardar.</p>
+<p class="form-help">
+  O contrato pode ser independente ou decorrer de um Acordo-Quadro. Ao seleccionar um Acordo-Quadro,
+  o ChivuGest limita o fornecedor aos participantes desse acordo e identifica automaticamente o instrumento
+  como <b>Contrato ao abrigo de Acordo-Quadro</b>. O Acordo-Quadro pode existir sem qualquer contrato associado.
+  Ao seleccionar um procedimento, os dados principais do procedimento continuam a alimentar o contrato.
+</p>
 </div>
 
 <div class="panel">
@@ -59,22 +74,89 @@
 </div>
 <script>
 (function(){
-  const select=document.getElementById('procedure_id');
-  if(!select) return;
-  select.addEventListener('change', function(){
-    const o=this.options[this.selectedIndex];
-    if(!o.value) return;
-    const set=(id,v)=>{const e=document.getElementById(id); if(e && v!==undefined && v!=='') e.value=v;};
-    set('supplier_id',o.dataset.supplier);
-    set('contract_object',o.dataset.object);
-    set('contract_type',o.dataset.category);
-    set('procedure_type',o.dataset.procedure);
-    set('original_value',o.dataset.value);
-    set('current_value',o.dataset.value);
-    set('cabimentacao_ref',o.dataset.cab);
-    const cb=document.getElementById('cabimentado');
-    if(cb) cb.checked=(o.dataset.cabOk==='1');
+  const procedure=document.getElementById('procedure_id');
+  const supplier=document.getElementById('supplier_id');
+  const framework=document.getElementById('framework_agreement_id');
+  const instrument=document.getElementById('instrument_type');
+  if(!supplier || !framework || !instrument) return;
+
+  const allSupplierOptions=[...supplier.options].map(o=>({
+    value:o.value, text:o.textContent, disabled:o.disabled
+  }));
+
+  function frameworkSupplierIds(){
+    const option=framework.options[framework.selectedIndex];
+    return option && option.dataset.suppliers
+      ? option.dataset.suppliers.split(',').filter(Boolean).map(Number)
+      : [];
+  }
+
+  function filterSuppliers(preferredId){
+    const ids=frameworkSupplierIds();
+    const current=preferredId || supplier.value;
+    supplier.innerHTML='';
+    const first=document.createElement('option');
+    first.value='';
+    first.textContent=ids.length ? 'Fornecedor participante' : 'Fornecedor';
+    supplier.appendChild(first);
+
+    allSupplierOptions.slice(1).forEach(item=>{
+      const opt=document.createElement('option');
+      opt.value=item.value;
+      opt.textContent=item.text;
+      if(ids.length && !ids.includes(Number(item.value))) opt.disabled=true;
+      supplier.appendChild(opt);
+    });
+
+    if(current && [...supplier.options].some(o=>o.value===String(current) && !o.disabled)){
+      supplier.value=String(current);
+    } else {
+      supplier.value='';
+    }
+  }
+
+  framework.addEventListener('change', function(){
+    filterSuppliers();
+    if(this.value) {
+      instrument.value='Contrato ao abrigo de Acordo-Quadro';
+    } else if(instrument.value==='Contrato ao abrigo de Acordo-Quadro') {
+      instrument.value='Contrato público';
+    }
   });
+
+  supplier.addEventListener('change', function(){
+    // Keep the selected supplier inside the Acordo-Quadro participant list.
+    const ids=frameworkSupplierIds();
+    if(framework.value && this.value && !ids.includes(Number(this.value))) {
+      this.value='';
+    }
+  });
+
+  if(procedure){
+    procedure.addEventListener('change', function(){
+      const o=this.options[this.selectedIndex];
+      if(!o.value) return;
+      const set=(id,v)=>{const e=document.getElementById(id); if(e && v!==undefined && v!=='') e.value=v;};
+      set('contract_object',o.dataset.object);
+      set('contract_type',o.dataset.category);
+      set('procedure_type',o.dataset.procedure);
+      set('original_value',o.dataset.value);
+      set('current_value',o.dataset.value);
+      set('cabimentacao_ref',o.dataset.cab);
+      const cb=document.getElementById('cabimentado');
+      if(cb) cb.checked=(o.dataset.cabOk==='1');
+
+      if(o.dataset.supplier){
+        // If the procedure supplies a vendor, keep that vendor.
+        const ids=frameworkSupplierIds();
+        if(!framework.value || ids.includes(Number(o.dataset.supplier))){
+          supplier.value=o.dataset.supplier;
+        }
+      }
+    });
+  }
+
+  filterSuppliers();
 })();
 </script>
 {% endblock %}

@@ -1262,6 +1262,22 @@ def contracts():
                 raise ValueError("Selecione o fornecedor ou associe um procedimento com fornecedor.")
             if not object_value:
                 raise ValueError("Indique o objecto do contrato.")
+
+            # A contract may be independent or may arise from an Acordo-Quadro.
+            # When linked to an Acordo-Quadro, the supplier must be one of the
+            # participating suppliers registered in that Acordo-Quadro.
+            framework_agreement = None
+            if framework_agreement_id:
+                framework_agreement = db.session.get(FrameworkAgreement, framework_agreement_id)
+                if not framework_agreement:
+                    raise ValueError("O Acordo-Quadro seleccionado não existe.")
+                participating_supplier_ids = {s.id for s in framework_agreement.suppliers.all()}
+                if supplier_id not in participating_supplier_ids:
+                    raise ValueError("O fornecedor seleccionado não participa no Acordo-Quadro indicado.")
+                instrument_type = "Contrato ao abrigo de Acordo-Quadro"
+            elif instrument_type == "Contrato ao abrigo de Acordo-Quadro":
+                raise ValueError("Para um contrato ao abrigo de Acordo-Quadro, seleccione o Acordo-Quadro associado.")
+
             start_date=parse_date(request.form["start_date"])
             end_date=parse_date(request.form["end_date"])
             original=num(request.form["original_value"])

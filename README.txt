@@ -51,3 +51,16 @@ Esta versão inclui:
 - Base legal com versões, exercício, entrada em vigor, histórico de verificações e detecção de alterações nas fontes.
 - A verificação de fontes legais não interpreta automaticamente uma alteração como nova regra. Alterações detectadas ficam sujeitas a validação humana antes da alteração dos parâmetros.
 - Verificação automática opcional: AUTO_LEGAL_CHECK=true; LEGAL_CHECK_INTERVAL_HOURS=6.
+
+
+ACTUALIZAÇÃO — GESTÃO ACRUADA DE ACORDOS-QUADRO / CONTRATOS — 01/10/2026
+
+- Acordo-Quadro permanece como entidade autónoma e pode existir sem contratos associados.
+- Um Acordo-Quadro é registado uma única vez e pode ter vários fornecedores participantes.
+- O cadastro de Contratos continua separado do cadastro de Acordos-Quadro.
+- Um contrato pode ser independente ou decorrer de um Acordo-Quadro.
+- Quando um contrato é associado a um Acordo-Quadro, o ChivuGest limita o fornecedor aos participantes desse acordo.
+- O instrumento do contrato é identificado automaticamente como "Contrato ao abrigo de Acordo-Quadro".
+- O sistema impede que um contrato seja associado a um Acordo-Quadro no qual o fornecedor não participa.
+- O sistema impede que seja usado o instrumento "Contrato ao abrigo de Acordo-Quadro" sem seleccionar o Acordo-Quadro.
+- A listagem de Acordos-Quadro mostra quantos contratos estão associados, inclusive zero.
