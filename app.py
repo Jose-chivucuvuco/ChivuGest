@@ -738,23 +738,127 @@ def normalize_os_status(value):
     if "emitid" in s or "aprov" in s: return "Emitida"
     return "Pendente"
 
+def _normalize_match_text(value):
+    value = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode().upper().strip()
+    value = re.sub(r"[^A-Z0-9]+", "", value)
+    return value
+
+def _invoice_number_keys(value):
+    raw = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode().upper()
+    raw = re.sub(r"(?:FATURA|FACTURA|INVOICE)\s*", "", raw)
+    raw = re.sub(r"N[Oº°]?\s*", "", raw)
+    compact = re.sub(r"[^A-Z0-9]+", "", raw)
+    keys={compact} if compact else set()
+    nums=re.findall(r"\d+", raw)
+    keys.update(nums)
+    return {k for k in keys if k}
+
+def _invoice_number_matches(a, b):
+    ka, kb = _invoice_number_keys(a), _invoice_number_keys(b)
+    return bool(ka and kb and ka.intersection(kb))
+
+def _supplier_match_for_payment_order(order):
+    if order.supplier_id:
+        supplier=db.session.get(Supplier, order.supplier_id)
+        if supplier:
+            return supplier
+    try:
+        data=json.loads(order.extracted_data or "{}")
+    except Exception:
+        data={}
+    nif=str(data.get("nif") or "").strip()
+    if nif:
+        supplier=Supplier.query.filter_by(nif=nif).first()
+        if supplier: return supplier
+    name=_normalize_match_text(data.get("supplier"))
+    if name:
+        for supplier in Supplier.query.all():
+            if _normalize_match_text(supplier.name)==name:
+                return supplier
+    return None
+
+def _reconcile_payment_orders(existing_only=False):
+    """Reconcile imported Ordens de Saque with supplier invoices.
+
+    Existing OS records are linked without requiring a new import. Matching priority:
+    1) existing invoice_id; 2) supplier + invoice number; 3) supplier + invoice number/amount;
+    4) supplier + amount + nearest issue date, only when the candidate is unique.
+    """
+    changed=0
+    orders=PaymentOrder.query.filter(PaymentOrder.invoice_id.is_(None)).all()
+    for order in orders:
+        supplier=_supplier_match_for_payment_order(order)
+        if not supplier:
+            continue
+        try:
+            data=json.loads(order.extracted_data or "{}")
+        except Exception:
+            data={}
+        inv_number=data.get("invoice_number") or ""
+        amount=money(order.amount)
+        candidates=SupplierInvoice.query.filter_by(supplier_id=supplier.id).all()
+        if not candidates:
+            continue
+
+        # Strongest match: normalized invoice number. This handles values such as
+        # "Fatura Nº 1972", "Factura 1972" and "1972" as the same document.
+        by_number=[i for i in candidates if _invoice_number_matches(inv_number, i.number)] if inv_number else []
+        chosen=None
+        if len(by_number)==1:
+            chosen=by_number[0]
+        elif len(by_number)>1:
+            amount_matches=[i for i in by_number if abs(money(i.total)-amount) <= max(0.01,money(i.total)*0.01)]
+            if len(amount_matches)==1: chosen=amount_matches[0]
+
+        # Fallback: unique amount match, preferably with a close issue date.
+        if chosen is None:
+            amount_matches=[i for i in candidates if abs(money(i.total)-amount) <= max(0.01,money(i.total)*0.01)]
+            if len(amount_matches)==1:
+                chosen=amount_matches[0]
+            elif len(amount_matches)>1 and order.issue_date:
+                dated=sorted(amount_matches, key=lambda i: abs((i.issue_date-order.issue_date).days) if i.issue_date else 10**9)
+                if len(dated)==1 or (dated[0].issue_date and dated[1].issue_date and abs((dated[0].issue_date-order.issue_date).days) < abs((dated[1].issue_date-order.issue_date).days)):
+                    chosen=dated[0]
+
+        if chosen is None:
+            continue
+
+        order.invoice_id=chosen.id
+        if not order.contract_id and chosen.contract_id: order.contract_id=chosen.contract_id
+        if not order.framework_agreement_id:
+            order.framework_agreement_id=chosen.framework_agreement_id or (chosen.contract.framework_agreement_id if chosen.contract else None)
+        order.reconciliation_status="Conferido"
+        order.reconciliation_notes=(order.reconciliation_notes or "") + ("; " if order.reconciliation_notes else "") + "Fatura reconciliada automaticamente no ChivuGest"
+        changed+=1
+    if changed:
+        db.session.commit()
+    return changed
+
 def match_payment_order(data):
     supplier=None
     nif=(data.get("nif") or "").strip()
     if nif: supplier=Supplier.query.filter_by(nif=nif).first()
     if not supplier and data.get("supplier"):
-        supplier=Supplier.query.filter(func.lower(Supplier.name)==str(data["supplier"]).strip().lower()).first()
+        normalized=_normalize_match_text(data.get("supplier"))
+        for s in Supplier.query.all():
+            if _normalize_match_text(s.name)==normalized:
+                supplier=s; break
     invoice=None
-    if data.get("invoice_number"):
-        q=SupplierInvoice.query.filter_by(number=str(data["invoice_number"]).strip())
-        if supplier: q=q.filter_by(supplier_id=supplier.id)
-        invoice=q.first()
+    invoice_number=data.get("invoice_number") or ""
+    candidates=SupplierInvoice.query.filter_by(supplier_id=supplier.id).all() if supplier else SupplierInvoice.query.all()
+    by_number=[i for i in candidates if _invoice_number_matches(invoice_number, i.number)] if invoice_number else []
+    if len(by_number)==1:
+        invoice=by_number[0]
+    elif len(by_number)>1:
+        amount=money(data.get("amount"))
+        amount_matches=[i for i in by_number if abs(money(i.total)-amount)<=max(0.01,money(i.total)*0.01)]
+        if len(amount_matches)==1: invoice=amount_matches[0]
     if not supplier and invoice: supplier=invoice.supplier
     contract=invoice.contract if invoice else None
     notes=[]
     if supplier: notes.append("Fornecedor identificado")
     else: notes.append("Fornecedor não identificado")
-    if invoice: notes.append("Fatura identificada")
+    if invoice: notes.append("Fatura identificada por número normalizado")
     else: notes.append("Fatura não identificada")
     amount=money(data.get("amount"))
     if invoice and abs(money(invoice.total)-amount) <= max(0.01, money(invoice.total)*0.01): notes.append("Valor compatível")
@@ -1728,6 +1832,9 @@ def resolve_alert(aid):
 # Reports helpers / PDF generation
 # -----------------------------------------------------------------------------
 def _report_invoice_rows(supplier_id=None, status=None, framework_id=None, contract_id=None, start_date=None, end_date=None):
+    # Reconcile previously imported OS records before building any report/export.
+    # This fixes legacy imports where invoice_id was left empty.
+    _reconcile_payment_orders(existing_only=True)
     q = SupplierInvoice.query
     if supplier_id: q = q.filter(SupplierInvoice.supplier_id == supplier_id)
     if framework_id:
@@ -1828,14 +1935,32 @@ def reports():
                            frameworks=frameworks, contracts_list=contracts, suppliers_list=suppliers)
 
 def _invoice_payment_order_numbers(invoice):
-    """Return the payment-order/ordem-de-saque numbers linked to an invoice.
-    Multiple OS records are preserved in one export cell, separated by '; '.
+    """Return all Ordem de Saque numbers associated with an invoice.
+
+    The application has two historical representations of supplier payments:
+    PaymentOrder (dedicated OS records) and SupplierPayment (older payment
+    records where method="Ordem de Saque" and the OS number was stored in
+    the receipt field). Reports must reconcile both representations.
     """
     numbers=[]
+
+    # 1) Dedicated Ordem de Saque records.
     for order in getattr(invoice, "payment_orders", []) or []:
         value=(order.os_number or "").strip()
         if value and value not in numbers:
             numbers.append(value)
+
+    # 2) Legacy/registered supplier payments whose payment method is OS.
+    #    These are visible in the "Pagamentos registados" table and may
+    #    already be linked to the invoice even when no PaymentOrder row exists.
+    for payment in getattr(invoice, "payments", []) or []:
+        method=_normalize_match_text(payment.method)
+        if "ORDEMDE SAQUE" not in method:
+            continue
+        value=(payment.receipt or "").strip()
+        if value and value not in numbers:
+            numbers.append(value)
+
     return "; ".join(numbers)
 
 
@@ -1899,7 +2024,11 @@ def report_export_xlsx():
             cell.number_format='#,##0.00'
     for col in range(1,12):
         max_len=max([len(str(ws.cell(row=r,column=col).value or "")) for r in range(1,ws.max_row+1)] or [10])
-        ws.column_dimensions[get_column_letter(col)].width=min(max(max_len+2,12),45)
+        ws.column_dimensions[get_column_letter(col)].width=min(max(max_len+3,12),50)
+    # Keep financial values visible in Excel instead of showing #### when the
+    # workbook is opened with a narrower default font/zoom.
+    for col, width in {6:24, 8:18, 9:18, 10:18}.items():
+        ws.column_dimensions[get_column_letter(col)].width=max(ws.column_dimensions[get_column_letter(col)].width, width)
     ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions
     ws.sheet_view.showGridLines=False
     buf=io.BytesIO(); wb.save(buf); buf.seek(0)
