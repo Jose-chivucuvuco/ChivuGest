@@ -470,16 +470,24 @@ def normalize_key(k):
     s = unicodedata.normalize("NFKD", str(k)).encode("ascii", "ignore").decode().lower().strip()
     s = re.sub(r"[^a-z0-9]+", "_", s).strip("_")
     aliases = {
-        "factura":"fatura", "n_fatura":"numero", "numero_fatura":"numero", "n_fatura":"numero",
-        "invoice_number":"numero", "invoice_no":"numero", "documento":"numero", "doc":"numero",
+        "factura":"fatura", "n_fatura":"numero", "n_da_fatura":"numero", "numero_fatura":"numero",
+        "numero_da_fatura":"numero", "invoice_number":"numero", "invoice_no":"numero",
+        "documento":"numero", "doc":"numero",
         "fornecedor":"fornecedor", "supplier":"fornecedor", "nome_fornecedor":"fornecedor", "emitente":"fornecedor",
         "nuit":"nif", "vat_number":"nif", "tax_id":"nif", "tin":"nif",
-        "data_emissao":"data", "issue_date":"data", "invoice_date":"data", "data_fatura":"data",
+        "data_emissao":"data", "issue_date":"data", "invoice_date":"data", "data_fatura":"data", "data_os":"data",
         "due_date":"vencimento", "data_vencimento":"vencimento", "data_limite":"vencimento",
-        "valor_total":"total", "total_fatura":"total", "valor":"total", "amount":"total", "grand_total":"total",
+        "valor_total":"total", "total_fatura":"total", "valor":"total", "valor_os":"total",
+        "montante":"total", "amount":"total", "grand_total":"total",
         "subtotal":"subtotal", "base_tributavel":"subtotal", "iva":"iva", "vat":"iva", "imposto":"iva",
         "moeda":"currency", "meio_pagamento":"metodo", "payment_method":"metodo", "metodo_pagamento":"metodo",
-        "iban":"iban", "referencia":"referencia", "reference":"referencia", "descricao":"descricao", "description":"descricao"
+        "iban":"iban", "referencia":"referencia", "reference":"referencia",
+        "referencia_bancaria":"referencia_bancaria", "referencia_banco":"referencia_bancaria",
+        "descricao":"descricao", "description":"descricao",
+        "ordem_de_saque":"ordem_de_saque", "ordem_saque":"ordem_saque", "numero_ordem":"numero_ordem",
+        "numero_da_ordem":"numero_ordem", "numero_os":"numero_os", "numero_da_os":"numero_os",
+        "n_os":"n_os", "n_da_os":"n_os", "os_numero":"numero_os",
+        "situacao":"situacao", "situacao_os":"situacao", "estado":"estado", "status":"status"
     }
     return aliases.get(s, s)
 
@@ -852,15 +860,56 @@ def extract_pdf_or_image(file_storage):
 
 
 def uploaded_rows(f):
+    """Read CSV/XLSX imports with strict resource limits.
+
+    Large DocFonte workbooks can contain tens of thousands of historical rows.
+    The previous implementation materialized the entire workbook with
+    ``list(ws.iter_rows(...))``, which could block the single Render worker and
+    trigger Gunicorn's timeout. We now stream only the first import window.
+    """
     name = (f.filename or "").lower()
+    max_rows = int(os.environ.get("CHIVUGEST_IMPORT_MAX_ROWS", "5000"))
+    max_cols = int(os.environ.get("CHIVUGEST_IMPORT_MAX_COLUMNS", "40"))
     if name.endswith(".xlsx"):
         if not load_workbook: raise ValueError("openpyxl não instalado.")
         wb = load_workbook(f, read_only=True, data_only=True)
-        ws = wb.active
-        data = list(ws.iter_rows(values_only=True)); wb.close()
-        if not data: return []
-        headers = [normalize_key(x) for x in data[0]]
-        return [dict(zip(headers, r)) for r in data[1:] if any(x is not None for x in r)]
+        try:
+            ws = wb.active
+            rows_iter = ws.iter_rows(min_row=1, max_row=max_rows + 30, max_col=max_cols, values_only=True)
+            preview = []
+            header_idx = None
+            known = {"fornecedor", "nif", "ordem_de_saque", "ordem_saque", "numero_os", "n_os", "fatura", "numero", "data", "total", "valor", "situacao", "estado"}
+            for idx, row in enumerate(rows_iter, start=1):
+                vals = list(row)
+                norm = [normalize_key(v) for v in vals]
+                score = sum(1 for x in norm if x in known)
+                if score >= 2:
+                    header_idx = idx
+                    headers = norm
+                    break
+                preview.append(vals)
+            if header_idx is None:
+                # Fall back to the first non-empty row, preserving the previous behavior.
+                for idx, vals in enumerate(preview, start=1):
+                    if any(v not in (None, "") for v in vals):
+                        header_idx = idx
+                        headers = [normalize_key(x) for x in vals]
+                        break
+            if header_idx is None: return []
+
+            out = []
+            for row in rows_iter:
+                if not any(x not in (None, "") for x in row):
+                    continue
+                item = dict(zip(headers, row))
+                if any(v not in (None, "") for v in item.values()):
+                    out.append(item)
+                if len(out) >= max_rows:
+                    break
+            return out
+        finally:
+            wb.close()
+
     if name.endswith(".csv"):
         raw = f.read()
         for enc in ("utf-8-sig", "cp1252", "latin-1"):
@@ -872,40 +921,29 @@ def uploaded_rows(f):
         except csv.Error:
             dialect = csv.excel
             dialect.delimiter = ";" if ";" in sample else ","
-        # Parse rows explicitly so malformed legacy exports are recoverable.
-        # Standard CSV remains fully supported, including quoted supplier names
-        # such as "CASA NOVA - HOME & OFFICE, LDA".
-        records=list(csv.reader(io.StringIO(s), dialect=dialect))
-        if not records: return []
-        headers=[normalize_key(x) for x in records[0]]
+        reader = csv.reader(io.StringIO(s), dialect=dialect)
+        try: headers_raw = next(reader)
+        except StopIteration: return []
+        headers = [normalize_key(x) for x in headers_raw]
         out=[]
-        for row in records[1:]:
+        expected={"fornecedor","nif","acordo_quadro","contrato","fatura","data","vencimento","total","pago","saldo","estado"}
+        for row_idx, row in enumerate(reader, start=2):
+            if row_idx > max_rows + 1: break
             if not any(str(x).strip() for x in row): continue
             if len(row)==len(headers):
                 out.append(dict(zip(headers,row))); continue
-            # Repair the legacy ChivuGest 11-column report where commas inside
-            # supplier names and an extra numeric zero shifted the columns.
-            expected={"fornecedor","nif","acordo_quadro","contrato","fatura","data","vencimento","total","pago","saldo","estado"}
             if set(headers)==expected and len(row)>len(headers):
                 nif_idx=next((idx for idx,v in enumerate(row) if re.fullmatch(r"\d{8,14}",str(v).strip())),None)
                 if nif_idx is not None and nif_idx>=1:
                     supplier=", ".join(str(v).strip() for v in row[:nif_idx]).strip()
                     tail=row[nif_idx:]
-                    # After NIF, the first seven fields through Total are stable.
-                    # Recalculate Saldo from Total-Pago rather than trusting the
-                    # shifted legacy columns.
                     if len(tail)>=10:
                         data=dict(zip(headers, [supplier]+tail[:10]))
                         data["fornecedor"]=supplier; data["nif"]=tail[0]
-                        try:
-                            total_val=num(data.get("total")); paid_val=num(data.get("pago"))
-                            data["saldo"]=f"{max(total_val-paid_val,0):.2f}"
-                            data["estado"]=str(row[-1]).strip() or ("Paga" if total_val<=paid_val else "Pendente")
-                            out.append(data); continue
-                        except Exception:
-                            pass
-            # Conservative fallback: keep the first columns rather than silently
-            # assigning a shifted NIF or amount to another business field.
+                        total_val=num(data.get("total")); paid_val=num(data.get("pago"))
+                        data["saldo"]=f"{max(total_val-paid_val,0):.2f}"
+                        data["estado"]=str(row[-1]).strip() or ("Paga" if total_val<=paid_val else "Pendente")
+                        out.append(data); continue
             out.append(dict(zip(headers,row[:len(headers)])))
         return out
     raise ValueError("Para tabelas use CSV/XLSX. Para documentos use PDF/imagem.")
@@ -1113,18 +1151,37 @@ def _reconcile_payment_orders(existing_only=False):
         db.session.commit()
     return changed
 
-def match_payment_order(data):
+def match_payment_order(data, supplier_pool=None, invoice_pool=None):
+    """Match an imported DocFonte/OS row without issuing N+1 database queries.
+
+    For batch XLSX imports, callers can provide preloaded supplier/invoice lists.
+    This is critical on Render Free: the previous implementation loaded all
+    suppliers and all invoices again for every spreadsheet row.
+    """
     supplier=None
     nif=(data.get("nif") or "").strip()
-    if nif: supplier=Supplier.query.filter_by(nif=nif).first()
+    suppliers = supplier_pool if supplier_pool is not None else None
+    if nif:
+        if suppliers is not None:
+            supplier=next((s for s in suppliers if str(s.nif or "").strip()==nif), None)
+        else:
+            supplier=Supplier.query.filter_by(nif=nif).first()
     if not supplier and data.get("supplier"):
         normalized=_normalize_match_text(data.get("supplier"))
-        for s in Supplier.query.all():
-            if _normalize_match_text(s.name)==normalized:
-                supplier=s; break
+        if suppliers is not None:
+            supplier=next((s for s in suppliers if _normalize_match_text(s.name)==normalized), None)
+        else:
+            # Keep the fallback bounded and database-backed rather than loading
+            # the entire supplier table for every imported row.
+            for s in Supplier.query.yield_per(250):
+                if _normalize_match_text(s.name)==normalized:
+                    supplier=s; break
     invoice=None
     invoice_number=data.get("invoice_number") or ""
-    candidates=SupplierInvoice.query.filter_by(supplier_id=supplier.id).all() if supplier else SupplierInvoice.query.all()
+    if invoice_pool is not None:
+        candidates=[i for i in invoice_pool if not supplier or i.supplier_id==supplier.id]
+    else:
+        candidates=SupplierInvoice.query.filter_by(supplier_id=supplier.id).all() if supplier else SupplierInvoice.query.all()
     by_number=[i for i in candidates if _invoice_number_matches(invoice_number, i.number)] if invoice_number else []
     if len(by_number)==1:
         invoice=by_number[0]
@@ -1843,7 +1900,21 @@ def import_payment_documents():
         filename=(f.filename or "").lower()
         created=0
         if filename.endswith((".csv", ".xlsx")):
-            rows=uploaded_rows(f)
+            # Read the upload once. Reusing the bytes avoids repeated getvalue()/stream
+            # operations for every row and keeps large DocFonte imports predictable.
+            raw_upload = f.read()
+            upload_hash = hashlib.sha256(raw_upload).hexdigest()
+            class _Upload:
+                def __init__(self, name, data): self.filename=name; self._data=data
+                def read(self): return self._data
+            rows=uploaded_rows(_Upload(f.filename, raw_upload))
+            if not rows:
+                raise ValueError("O ficheiro não contém linhas de dados reconhecíveis.")
+            if len(rows) >= int(os.environ.get("CHIVUGEST_IMPORT_MAX_ROWS", "5000")):
+                flash("O ficheiro contém muitas linhas. A importação foi limitada à janela configurada para proteger o servidor.")
+            match_cache={}
+            supplier_pool=Supplier.query.all()
+            invoice_pool=SupplierInvoice.query.all()
             for r in rows:
                 parsed={
                     "os_number": str(row_value(r,"ordem_saque","ordem_de_saque","os","numero_os","n_os","ordem","numero_ordem","referencia")).strip(),
@@ -1859,15 +1930,21 @@ def import_payment_documents():
                 parsed["confidence"]=min(100, sum(bool(parsed.get(k)) for k in ("os_number","supplier","invoice_number","date","amount"))*20 + (10 if parsed.get("nif") else 0))
                 if not parsed["os_number"]: continue
                 # Stable row hash avoids duplicate imports while preserving one hash per OS row.
-                parsed["hash"]=hashlib.sha256((hashlib.sha256(f.getvalue()).hexdigest()+json.dumps(parsed,sort_keys=True,default=str)).encode()).hexdigest()
+                parsed["hash"]=hashlib.sha256((upload_hash+json.dumps(parsed,sort_keys=True,default=str)).encode()).hexdigest()
                 if PaymentOrder.query.filter_by(source_hash=parsed["hash"]).first(): continue
-                supplier,invoice,contract,recon_status,recon_notes=match_payment_order(parsed)
+                cache_key=(parsed.get("nif") or "", _normalize_match_text(parsed.get("supplier") or ""), parsed.get("invoice_number") or "", money(parsed.get("amount")))
+                if cache_key in match_cache:
+                    supplier,invoice,contract,recon_status,recon_notes=match_cache[cache_key]
+                else:
+                    supplier,invoice,contract,recon_status,recon_notes=match_payment_order(parsed, supplier_pool=supplier_pool, invoice_pool=invoice_pool)
+                    match_cache[cache_key]=(supplier,invoice,contract,recon_status,recon_notes)
                 if not supplier:
                     sname=(parsed.get("supplier") or "Fornecedor a identificar").strip()
                     supplier=Supplier.query.filter_by(name=sname).first()
                     if not supplier:
                         supplier=Supplier(name=sname,nif=parsed.get("nif") or None,contracting_type="Outro / Regime especial")
                         db.session.add(supplier); db.session.flush()
+                        supplier_pool.append(supplier)
                 doc=SourceDocument(document_type=source_type,document_number=parsed["os_number"],supplier_id=supplier.id,source_filename=f.filename,source_hash=parsed["hash"],issue_date=parsed["date_parsed"],amount=parsed["amount"],extracted_data=json.dumps(parsed,ensure_ascii=False),import_confidence=parsed["confidence"])
                 osr=PaymentOrder(os_number=parsed["os_number"],supplier_id=supplier.id,invoice_id=invoice.id if invoice else None,contract_id=contract.id if contract else None,framework_agreement_id=(contract.framework_agreement_id if contract else (invoice.framework_agreement_id if invoice else None)),issue_date=parsed["date_parsed"],amount=parsed["amount"],status=normalize_os_status(parsed["status"]),bank_reference=parsed["bank_reference"],source_type=source_type,source_filename=f.filename,source_hash=parsed["hash"],extracted_data=json.dumps(parsed,ensure_ascii=False),reconciliation_status=recon_status,reconciliation_notes=recon_notes)
                 db.session.add_all([doc,osr]); created+=1
