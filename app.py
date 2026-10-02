@@ -21,7 +21,7 @@ try:
     from openpyxl import load_workbook
 except ImportError:
     load_workbook = None
-from PIL import Image
+from PIL import Image, ImageOps, ImageFilter
 try:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
@@ -434,15 +434,32 @@ def money(v):
 
 
 def num(v):
+    """Parse Angolan/Portuguese monetary formats without turning grouped values into 0.
+
+    Examples: 30.000.000,00 ; 30 000 000,00 ; 30.000.000 ; 30,000,000.00.
+    """
     if v is None or str(v).strip() == "": return 0.0
     s = str(v).strip().upper().replace("AOA", "").replace("AKZ", "").replace("KZ", "").replace("$", "").replace("€", "")
-    s = re.sub(r"[^0-9,.-]", "", s)
+    s = re.sub(r"[^0-9,.'\-]", "", s).replace("'", "").replace(".", ".")
+    # If both separators occur, the right-most separator is the decimal marker.
     if "," in s and "." in s:
-        if s.rfind(",") > s.rfind("."): s = s.replace(".", "").replace(",", ".")
-        else: s = s.replace(",", "")
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "." in s:
+        # Multiple 3-digit dot groups are thousands separators, not decimals.
+        if re.fullmatch(r"-?\d{1,3}(?:\.\d{3})+", s):
+            s = s.replace(".", "")
+        # A single 3-digit group after the dot is also usually a thousands group
+        # in Portuguese/Angolan accounting exports.
+        elif re.fullmatch(r"-?\d+\.\d{3}", s):
+            s = s.replace(".", "")
     elif "," in s:
-        # 1,234.56 was handled above; here comma is normally decimal in Angola/Portugal.
-        s = s.replace(",", ".")
+        if re.fullmatch(r"-?\d{1,3}(?:,\d{3})+", s):
+            s = s.replace(",", "")
+        else:
+            s = s.replace(",", ".")
     try: return float(s)
     except (ValueError, TypeError): return 0.0
 
@@ -488,41 +505,68 @@ def regex_first(text_value, patterns):
 
 
 def parse_invoice_text(text_value):
+    """Extract invoice fields from native PDF text or OCR text.
+
+    OCR frequently loses labels/accents and invoice layouts vary considerably,
+    so the parser deliberately uses several fallbacks instead of requiring a
+    label such as ``Fornecedor:`` to be present.
+    """
     text_value = normalize_text(text_value)
+    lines=[re.sub(r"[ \t]+", " ", x).strip() for x in text_value.splitlines() if x.strip()]
+    upper="\n".join(lines)
+
     number = regex_first(text_value, [
-        r"(?:fatura|factura|invoice|documento)\s*(?:n[ºo°]?|no|numero|número|number)?\s*[:#-]?\s*([A-Z]{0,5}[A-Z0-9./_-]{2,})",
-        r"\b((?:FT|FA|FR|FAC|INV)[\s./_-]*[A-Z0-9_-]{2,})\b"
+        r"(?:fatura|factura|invoice|documento)\s*(?:n[ºo°]?|no|numero|número|number)?\s*[:#-]?\s*([A-Z]{0,5}[A-Z0-9./_-]{1,})",
+        r"(?:n[ºo°]|no|número|numero)\s*[:#-]?\s*([A-Z0-9./_-]{2,})",
+        r"\b((?:FT|FA|FR|FAC|INV)[\s./_-]*[A-Z0-9_-]{1,})\b"
     ])
-    nif = regex_first(text_value, [r"(?:NIF|NUIT|N\.I\.F\.)\s*[:#-]?\s*([0-9]{8,15})"])
+    nif = regex_first(text_value, [r"(?:NIF|NUIT|N\.I\.F\.|N I F)\s*[:#-]?\s*([0-9][0-9 .-]{7,14})"])
+    nif = re.sub(r"\D", "", nif)
+
     supplier = regex_first(text_value, [
-        r"(?:fornecedor|supplier|emitente|vendedor)\s*[:#-]\s*([^\n\r]{3,120})",
-        r"(?:nome|name)\s*[:#-]\s*([^\n\r]{3,120})"
+        r"(?:fornecedor|supplier|emitente|vendedor|benefici[aá]rio)\s*[:#-]\s*([^\n\r]{3,160})",
+        r"(?:nome|name)\s*[:#-]\s*([^\n\r]{3,160})"
     ])
+    supplier = supplier.strip(" :-|;")
+    # Header fallback: many invoices print the legal name without a label.
+    if not supplier:
+        for line in lines[:25]:
+            clean=re.sub(r"[^A-Za-zÀ-ÿ0-9& .,'()\-]", "", line).strip()
+            if (re.search(r"\b(?:LDA|S\.A\.?|SA|SU|E\.P\.?|EP|LIMITADA)\b", clean, re.I)
+                and len(clean) >= 6 and not re.search(r"(?:fatura|factura|invoice|nif|iban|data|total|iva)", clean, re.I)):
+                supplier=clean
+                break
+
     dates = re.findall(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})\b", text_value)
+    # Label-aware date fallback, then first date as issue date.
+    labeled_dates=re.findall(r"(?:data|date|emiss[aã]o|emissao|vencimento|due)\s*[:#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})", text_value, re.I)
     total = regex_first(text_value, [
-        r"(?:total a pagar|total da fatura|total factura|total fatura|grand total|valor total|total)\s*[:=\-]?\s*(?:AOA|KZ|AKZ)?\s*([0-9][0-9 .,'-]{1,})",
-        r"(?:valor a pagar|montante)\s*[:=\-]?\s*(?:AOA|KZ|AKZ)?\s*([0-9][0-9 .,'-]{1,})"
+        r"(?:total\s+a\s+pagar|total\s+da\s+fatura|total\s+factura|total\s+fatura|grand\s+total|valor\s+total|total\s+geral|total)\s*[:=\-]?\s*(?:AOA|KZ|AKZ)?\s*([0-9][0-9 .,'-]{1,})",
+        r"(?:valor\s+a\s+pagar|montante|a\s+pagar)\s*[:=\-]?\s*(?:AOA|KZ|AKZ)?\s*([0-9][0-9 .,'-]{1,})"
     ])
-    subtotal = regex_first(text_value, [r"(?:subtotal|total liquido|base tributavel)\s*[:=\-]?\s*(?:AOA|KZ|AKZ)?\s*([0-9][0-9 .,'-]{1,})"])
+    subtotal = regex_first(text_value, [r"(?:subtotal|total\s+liquido|total\s+líquido|base\s+tribut[aá]vel)\s*[:=\-]?\s*(?:AOA|KZ|AKZ)?\s*([0-9][0-9 .,'-]{1,})"])
     vat = regex_first(text_value, [r"(?:IVA|VAT)\s*(?:\([0-9]+(?:[.,][0-9]+)?%\))?\s*[:=\-]?\s*(?:AOA|KZ|AKZ)?\s*([0-9][0-9 .,'-]{1,})"])
-    iban = regex_first(text_value, [r"\b(\w{2}\d{2}[A-Z0-9 ]{10,34})\b"])
+    # Fallback for invoices where the amount appears immediately after the word TOTAL.
+    if not total:
+        for line in lines:
+            if re.search(r"\bTOTAL\b", line, re.I):
+                m=re.search(r"(?:TOTAL[^0-9]{0,20})([0-9][0-9 .,'-]{2,})", line, re.I)
+                if m:
+                    total=m.group(1); break
+    iban = regex_first(text_value, [r"\b([A-Z]{2}\d{2}[A-Z0-9 ]{10,34})\b"])
     currency = "AOA" if re.search(r"\b(?:KZ|AOA|AKZ|KWANZA|KWANZAS)\b", text_value, re.I) else ""
-    framework = regex_first(text_value, [
-        r"(?:acordo[- ]?quadro|framework agreement|aq)\s*(?:n[ºo°]?|no|numero|number)?\s*[:#=-]?\s*([A-Z0-9./_-]+)",
-    ])
-    contract = regex_first(text_value, [
-        r"(?:contrato|contract)\s*(?:n[ºo°]?|no|numero|number)?\s*[:#=-]?\s*([A-Z0-9./_-]+)",
-    ])
+    framework = regex_first(text_value, [r"(?:acordo[- ]?quadro|framework\s+agreement|aq)\s*(?:n[ºo°]?|no|numero|number)?\s*[:#=-]?\s*([A-Z0-9./_-]+)"])
+    contract = regex_first(text_value, [r"(?:contrato|contract)\s*(?:n[ºo°]?|no|numero|number)?\s*[:#=-]?\s*([A-Z0-9./_-]+)"])
     os_number = regex_first(text_value, [
-        r"(?:ordem\s+de\s+s[aá]que|ordem\s+s[aá]que|order\s+of\s+payment|OS)\s*(?:n[ºo°]?|no|numero|number)?\s*[:#=-]?\s*([A-Z0-9./_-]+)",
+        r"(?:ordem\s+de\s+s[aá]que|ordem\s+s[aá]que|order\s+of\s+payment|O\.?S\.?)\s*(?:n[ºo°]?|no|numero|number)?\s*[:#=-]?\s*([A-Z0-9./_-]+)",
+        r"\b(OS\s*(?:N[ºo°]?\s*)?[0-9]{2,})\b"
     ])
-    payment_method = regex_first(text_value, [
-        r"(?:meio\s+de\s+pagamento|m[eé]todo\s+de\s+pagamento|payment\s+method)\s*[:#=-]?\s*([^\n]{2,60})"
-    ])
+    payment_method = regex_first(text_value, [r"(?:meio\s+de\s+pagamento|m[eé]todo\s+de\s+pagamento|payment\s+method)\s*[:#=-]?\s*([^\n]{2,60})"])
     reference = regex_first(text_value, [r"(?:refer[eê]ncia|reference)\s*[:#=-]?\s*([A-Z0-9./_-]+)"])
     data = {
         "number": number, "supplier": supplier, "nif": nif,
-        "date": dates[0] if dates else "", "due_date": dates[1] if len(dates) > 1 else "",
+        "date": labeled_dates[0] if labeled_dates else (dates[0] if dates else ""),
+        "due_date": labeled_dates[1] if len(labeled_dates)>1 else (dates[1] if len(dates)>1 else ""),
         "subtotal": num(subtotal), "vat": num(vat), "total": num(total), "currency": currency,
         "iban": iban.replace(" ", ""), "framework_agreement": framework, "contract": contract,
         "os_number": os_number, "payment_method": payment_method, "reference": reference, "text": text_value
@@ -580,33 +624,64 @@ def extract_pdf_or_image(file_storage):
     raw = file_storage.read()
     digest = hashlib.sha256(raw).hexdigest()
     texts = []
+
+    def ocr_image(img):
+        if pytesseract is None: raise ValueError("OCR não instalado no servidor. Instale tesseract-ocr e tesseract-ocr-por.")
+        gray=img.convert("L")
+        scale=2 if max(gray.width, gray.height) < 2200 else 1
+        gray=gray.resize((gray.width*scale, gray.height*scale), Image.Resampling.LANCZOS)
+        gray=ImageOps.autocontrast(gray)
+        gray=gray.filter(ImageFilter.SHARPEN)
+        variants=[gray]
+        # A thresholded copy helps with faded/low-contrast scans.
+        try: variants.append(gray.point(lambda p: 255 if p > 180 else 0))
+        except Exception: pass
+        passes=[]
+        for variant in variants:
+            for psm in (6, 11, 4):
+                try:
+                    txt=pytesseract.image_to_string(variant, lang="por+eng", config=f"--psm {psm}")
+                except Exception:
+                    try: txt=pytesseract.image_to_string(variant, lang="eng", config=f"--psm {psm}")
+                    except Exception: txt=""
+                if txt and txt.strip(): passes.append(txt)
+        return "\n".join(passes)
+
     if filename.endswith(".pdf"):
         if fitz is None: raise ValueError("PyMuPDF não instalado.")
         doc = fitz.open(stream=raw, filetype="pdf")
         for page in doc:
-            txt = page.get_text("text") or ""
-            if len(re.sub(r"\s+", "", txt)) < 40:
-                if pytesseract is None: raise ValueError("OCR não instalado.")
-                pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
-                img = Image.frombytes("L", [pix.width, pix.height], pix.samples)
-                try: txt = pytesseract.image_to_string(img, lang="por+eng", config="--psm 6")
-                except Exception: txt = pytesseract.image_to_string(img, lang="eng", config="--psm 6")
-                img.close()
-                del img, pix
-            texts.append(txt)
+            native = page.get_text("text") or ""
+            parsed_native=parse_invoice_text(native) if native else {}
+            # OCR whenever native text is absent OR clearly lacks key invoice fields.
+            weak=(len(re.sub(r"\s+", "", native)) < 80 or
+                  not parsed_native.get("number") or not parsed_native.get("total"))
+            if weak and pytesseract is not None:
+                pix = page.get_pixmap(matrix=fitz.Matrix(2.2, 2.2), alpha=False)
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                try: ocr=ocr_image(img)
+                finally: img.close(); del pix
+                texts.append(native)
+                texts.append(ocr)
+            else:
+                texts.append(native)
         doc.close()
     elif filename.endswith((".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff")):
         if pytesseract is None: raise ValueError("OCR não instalado.")
-        img = Image.open(io.BytesIO(raw)).convert("L")
-        img.thumbnail((1800, 1800), Image.Resampling.LANCZOS)
-        try: texts.append(pytesseract.image_to_string(img, lang="por+eng", config="--psm 6"))
-        except Exception: texts.append(pytesseract.image_to_string(img, lang="eng", config="--psm 6"))
-        img.close()
+        img = Image.open(io.BytesIO(raw))
+        try: texts.append(ocr_image(img))
+        finally: img.close()
     else:
         raise ValueError("Formato não suportado para OCR. Use PDF, PNG, JPG, JPEG, WEBP, TIF ou TIFF.")
-    parsed = parse_invoice_text("\n".join(texts))
+    combined="\n".join(x for x in texts if x)
+    if not combined.strip():
+        raise ValueError("Não foi possível extrair texto do documento. Verifique se o PDF/imagem está legível ou digitalizado e tente novamente.")
+    parsed = parse_invoice_text(combined)
     parsed["hash"] = digest
     parsed["filename"] = file_storage.filename
+    parsed["ocr_text_length"] = len(combined.strip())
+    if parsed.get("confidence", 0) == 0:
+        parsed["ocr_warning"] = "O documento foi lido, mas nenhum campo essencial de fatura foi reconhecido. Revise o documento ou melhore a qualidade da digitalização."
     return parsed
 
 
