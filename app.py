@@ -278,6 +278,20 @@ class SourceDocument(db.Model):
     contract = db.relationship("Contract", backref="source_documents")
     framework_agreement = db.relationship("FrameworkAgreement", backref="source_documents")
 
+class ImportBatch(db.Model):
+    __tablename__ = "import_batch"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"))
+    source_filename = db.Column(db.String(255), nullable=False)
+    source_type = db.Column(db.String(40), nullable=False)
+    imported_at = db.Column(db.DateTime, default=datetime.utcnow)
+    total_records = db.Column(db.Integer, default=0)
+    valid_records = db.Column(db.Integer, default=0)
+    review_records = db.Column(db.Integer, default=0)
+    duplicate_records = db.Column(db.Integer, default=0)
+    rejected_records = db.Column(db.Integer, default=0)
+    errors = db.Column(db.Text)
+
 class LegalRule(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     code = db.Column(db.String(100), unique=True, nullable=False)
@@ -493,11 +507,25 @@ def parse_invoice_text(text_value):
     vat = regex_first(text_value, [r"(?:IVA|VAT)\s*(?:\([0-9]+(?:[.,][0-9]+)?%\))?\s*[:=\-]?\s*(?:AOA|KZ|AKZ)?\s*([0-9][0-9 .,'-]{1,})"])
     iban = regex_first(text_value, [r"\b(\w{2}\d{2}[A-Z0-9 ]{10,34})\b"])
     currency = "AOA" if re.search(r"\b(?:KZ|AOA|AKZ|KWANZA|KWANZAS)\b", text_value, re.I) else ""
+    framework = regex_first(text_value, [
+        r"(?:acordo[- ]?quadro|framework agreement|aq)\s*(?:n[ºo°]?|no|numero|number)?\s*[:#=-]?\s*([A-Z0-9./_-]+)",
+    ])
+    contract = regex_first(text_value, [
+        r"(?:contrato|contract)\s*(?:n[ºo°]?|no|numero|number)?\s*[:#=-]?\s*([A-Z0-9./_-]+)",
+    ])
+    os_number = regex_first(text_value, [
+        r"(?:ordem\s+de\s+s[aá]que|ordem\s+s[aá]que|order\s+of\s+payment|OS)\s*(?:n[ºo°]?|no|numero|number)?\s*[:#=-]?\s*([A-Z0-9./_-]+)",
+    ])
+    payment_method = regex_first(text_value, [
+        r"(?:meio\s+de\s+pagamento|m[eé]todo\s+de\s+pagamento|payment\s+method)\s*[:#=-]?\s*([^\n]{2,60})"
+    ])
+    reference = regex_first(text_value, [r"(?:refer[eê]ncia|reference)\s*[:#=-]?\s*([A-Z0-9./_-]+)"])
     data = {
         "number": number, "supplier": supplier, "nif": nif,
         "date": dates[0] if dates else "", "due_date": dates[1] if len(dates) > 1 else "",
         "subtotal": num(subtotal), "vat": num(vat), "total": num(total), "currency": currency,
-        "iban": iban.replace(" ", ""), "text": text_value
+        "iban": iban.replace(" ", ""), "framework_agreement": framework, "contract": contract,
+        "os_number": os_number, "payment_method": payment_method, "reference": reference, "text": text_value
     }
     if not data["total"] and data["subtotal"]:
         data["total"] = data["subtotal"] + data["vat"]
@@ -2138,6 +2166,93 @@ def report_document_download(doc_id):
     return send_file(io.BytesIO(doc.content),mimetype="application/pdf",as_attachment=True,download_name=doc.source_filename)
 
 # -----------------------------------------------------------------------------
+# Intelligent invoice import validation / reconciliation
+# -----------------------------------------------------------------------------
+def _find_supplier_for_invoice(data):
+    nif=re.sub(r"\D", "", str(data.get("nif") or ""))
+    if nif:
+        s=Supplier.query.filter_by(nif=nif).first()
+        if s: return s, "NIF"
+    name=_normalize_match_text(data.get("supplier"))
+    if name:
+        exact=[s for s in Supplier.query.all() if _normalize_match_text(s.name)==name]
+        if len(exact)==1: return exact[0], "Nome"
+    return None, ""
+
+def _find_framework_for_invoice(data, supplier=None):
+    code=str(data.get("framework_agreement") or "").strip()
+    if not code: return None
+    q=FrameworkAgreement.query.filter(FrameworkAgreement.code.ilike(code))
+    matches=q.all()
+    if supplier:
+        matches=[fa for fa in matches if supplier.id in {x.id for x in fa.suppliers.all()}]
+    return matches[0] if len(matches)==1 else None
+
+def _find_contract_for_invoice(data, supplier=None, framework=None):
+    code=str(data.get("contract") or "").strip()
+    if not code: return None
+    q=Contract.query.filter(Contract.number.ilike(code))
+    matches=q.all()
+    if supplier: matches=[c for c in matches if c.supplier_id==supplier.id]
+    if framework: matches=[c for c in matches if c.framework_agreement_id==framework.id]
+    return matches[0] if len(matches)==1 else None
+
+def analyze_invoice_import(data):
+    supplier, supplier_match=_find_supplier_for_invoice(data)
+    framework=_find_framework_for_invoice(data, supplier)
+    contract=_find_contract_for_invoice(data, supplier, framework)
+    number=str(data.get("number") or "").strip()
+    amount=money(data.get("total"))
+    duplicate_hash=SupplierInvoice.query.filter_by(source_hash=data.get("hash")).first() if data.get("hash") else None
+    duplicates=[]
+    if supplier and number:
+        duplicates=SupplierInvoice.query.filter(SupplierInvoice.supplier_id==supplier.id).all()
+        duplicates=[i for i in duplicates if _invoice_number_matches(i.number, number)]
+    math_ok=(not data.get("subtotal") and not data.get("vat")) or abs((money(data.get("subtotal"))+money(data.get("vat")))-amount) <= 0.01
+    if not amount and data.get("subtotal"): amount=money(data.get("subtotal"))+money(data.get("vat"))
+    invoice_match=None
+    if supplier and duplicates:
+        if len(duplicates)==1: invoice_match=duplicates[0]
+        else:
+            same_amount=[i for i in duplicates if abs(money(i.total)-amount)<=0.01]
+            if len(same_amount)==1: invoice_match=same_amount[0]
+    os_match=None
+    if supplier:
+        for order in PaymentOrder.query.filter_by(supplier_id=supplier.id).all():
+            if number and order.invoice_id and _invoice_number_matches(number, order.invoice.number):
+                os_match=order; break
+            if number:
+                try: od=json.loads(order.extracted_data or "{}")
+                except Exception: od={}
+                if _invoice_number_matches(number, od.get("invoice_number")): os_match=order; break
+            if amount and abs(money(order.amount)-amount)<=0.01 and not os_match: os_match=order
+    paid_match=SupplierPayment.query.filter_by(invoice_id=invoice_match.id).all() if invoice_match else []
+    paid_amount=sum(money(x.amount) for x in paid_match)
+    issues=[]
+    if not supplier: issues.append("Fornecedor não encontrado no cadastro.")
+    if not number: issues.append("Número da fatura não reconhecido.")
+    if not data.get("date"): issues.append("Data da fatura não reconhecida.")
+    if not amount: issues.append("Total da fatura não reconhecido.")
+    if data.get("subtotal") or data.get("vat"):
+        if not math_ok: issues.append("Subtotal + IVA não corresponde ao Total.")
+    if duplicate_hash: issues.append("Documento duplicado por hash.")
+    if len(duplicates)>1 and not invoice_match: issues.append("Existem múltiplas faturas com o mesmo número; requer revisão.")
+    if framework and supplier and supplier.id not in {s.id for s in framework.suppliers.all()}: issues.append("Fornecedor não está associado ao Acordo-Quadro indicado.")
+    if contract and supplier and contract.supplier_id!=supplier.id: issues.append("Contrato não pertence ao fornecedor identificado.")
+    if framework and contract and contract.framework_agreement_id!=framework.id: issues.append("Contrato e Acordo-Quadro não correspondem.")
+    if framework:
+        limit=money(framework.estimated_value)
+        if limit and amount:
+            existing=money(db.session.query(func.coalesce(func.sum(SupplierInvoice.total),0)).filter(SupplierInvoice.framework_agreement_id==framework.id).scalar())
+            if contract and contract.framework_agreement_id==framework.id:
+                existing=money(db.session.query(func.coalesce(func.sum(SupplierInvoice.total),0)).filter(SupplierInvoice.contract.has(Contract.framework_agreement_id==framework.id)).scalar())
+            if existing+amount>limit: issues.append(f"Faturação projetada de Kz {existing+amount:,.2f} ultrapassa o limite do Acordo-Quadro de Kz {limit:,.2f}.")
+    confidence=int(data.get("confidence") or 0)
+    confidence=min(100, confidence + (10 if supplier else 0) + (5 if framework else 0) + (5 if contract else 0) + (5 if os_match else 0))
+    data.update({"supplier_id":supplier.id if supplier else None,"supplier_match":supplier_match,"framework_id":framework.id if framework else None,"contract_id":contract.id if contract else None,"os_match_id":os_match.id if os_match else None,"os_match_number":os_match.os_number if os_match else (data.get("os_number") or ""),"paid_match_amount":paid_amount,"duplicate":bool(duplicate_hash or invoice_match),"math_ok":math_ok,"issues":issues,"review_required":bool(issues),"confidence":min(confidence,100)})
+    return data
+
+# -----------------------------------------------------------------------------
 # Robust import centre
 # -----------------------------------------------------------------------------
 @app.route("/import", methods=["GET", "POST"])
@@ -2146,54 +2261,81 @@ def import_center():
     if request.method == "POST":
         kind=request.form.get("kind")
         f=request.files.get("file")
-        if not f or not f.filename: flash("Selecione um ficheiro."); return redirect(url_for("import_center"))
+        if not f or not f.filename:
+            flash("Selecione um ficheiro."); return redirect(url_for("import_center"))
+        batch=ImportBatch(user_id=session.get("uid"), source_filename=f.filename, source_type=kind or "desconhecido")
+        db.session.add(batch); db.session.flush()
         try:
             if kind == "supplier_invoices_table":
-                rows=uploaded_rows(f); n=0
+                rows=uploaded_rows(f); batch.total_records=len(rows); valid=review=dup=reject=0; errors=[]
                 for r in rows:
-                    supplier_name=str(row_value(r,"fornecedor","supplier","emitente")).strip()
-                    number=str(row_value(r,"numero","fatura","factura","invoice_number")).strip()
-                    total=num(row_value(r,"total","valor","amount"))
-                    if not supplier_name or not number or total <= 0: continue
-                    s=Supplier.query.filter_by(name=supplier_name).first()
-                    if not s:
-                        s=Supplier(name=supplier_name,nif=str(row_value(r,"nif","nuit")),contracting_type="Outro / Regime especial")
-                        db.session.add(s); db.session.flush()
-                    inv=SupplierInvoice(number=number,supplier_id=s.id,issue_date=parse_date(row_value(r,"data","issue_date")),
-                        due_date=parse_date(row_value(r,"vencimento","due_date"),None),subtotal=num(row_value(r,"subtotal")),vat=num(row_value(r,"iva","vat")),
-                        total=total,paid=num(row_value(r,"pago","paid")),currency=str(row_value(r,"currency","moeda")) or "AOA",
-                        source_filename=f.filename)
-                    inv.status="Paga" if inv.paid>=inv.total else ("Parcial" if inv.paid>0 else "Pendente")
-                    db.session.add(inv); n+=1
-                db.session.commit(); flash(f"Importação concluída: {n} fatura(s).")
+                    parsed={"number":str(row_value(r,"numero","fatura","factura","invoice_number")).strip(),"supplier":str(row_value(r,"fornecedor","supplier","emitente")).strip(),"nif":str(row_value(r,"nif","nuit" )).strip(),"date":str(row_value(r,"data","issue_date") or "").strip(),"due_date":str(row_value(r,"vencimento","due_date") or "").strip(),"subtotal":num(row_value(r,"subtotal")),"vat":num(row_value(r,"iva","vat")),"total":num(row_value(r,"total","valor","amount")),"currency":str(row_value(r,"currency","moeda")) or "AOA","framework_agreement":str(row_value(r,"acordo_quadro","acordo-quadro","framework_agreement","aq") or "").strip(),"contract":str(row_value(r,"contrato","contract") or "").strip(),"os_number":str(row_value(r,"ordem_saque","ordem_de_saque","os","numero_os","n_os") or "").strip(),"payment_method":str(row_value(r,"metodo","meio_pagamento","payment_method") or "").strip(),"reference":str(row_value(r,"referencia","reference") or "").strip()}
+                    if not parsed["total"] and parsed["subtotal"]: parsed["total"]=parsed["subtotal"]+parsed["vat"]
+                    parsed["hash"]=hashlib.sha256(json.dumps(parsed,sort_keys=True,ensure_ascii=False).encode()).hexdigest(); parsed["confidence"]=60
+                    a=analyze_invoice_import(parsed)
+                    if a["duplicate"]: dup+=1; continue
+                    if a["issues"]: review+=1; errors.append({"row":r,"issues":a["issues"]}); continue
+                    valid+=1
+                batch.valid_records=valid; batch.review_records=review; batch.duplicate_records=dup; batch.rejected_records=reject; batch.errors=json.dumps(errors,ensure_ascii=False,default=str)
+                db.session.commit(); flash(f"Lote analisado: {batch.total_records} documento(s), {valid} válido(s), {review} para revisão e {dup} duplicado(s).")
             elif kind == "pdf_invoice":
-                parsed=extract_invoice_document(f)
+                parsed=analyze_invoice_import(extract_invoice_document(f))
                 existing=SupplierInvoice.query.filter_by(source_hash=parsed["hash"]).first()
-                if existing: raise ValueError("Este documento já foi importado anteriormente.")
+                if existing: parsed["duplicate"]=True; parsed["issues"]=["Documento já importado anteriormente por hash."]
                 session["invoice_import"] = parsed
                 return render_template("invoice_review.html", data=parsed)
             else:
                 raise ValueError("Tipo de importação desconhecido.")
         except Exception as e:
             db.session.rollback(); flash("Erro na importação: "+str(e))
-    return render_template("import_center.html")
+    return render_template("import_center.html", history=ImportBatch.query.order_by(ImportBatch.imported_at.desc()).limit(20).all())
+
+@app.route("/import/history/<int:batch_id>")
+@login_required
+def import_history_detail(batch_id):
+    batch=db.session.get(ImportBatch,batch_id)
+    if not batch: abort(404)
+    return render_template("import_history_detail.html", batch=batch)
 
 @app.route("/import/invoice-confirm", methods=["POST"])
 @login_required
 def invoice_confirm():
     data=session.pop("invoice_import", {})
     try:
-        supplier_name=request.form["supplier"]
-        s=Supplier.query.filter_by(name=supplier_name).first()
+        supplier_id=request.form.get("supplier_id",type=int)
+        s=db.session.get(Supplier,supplier_id) if supplier_id else None
+        supplier_name=request.form.get("supplier","").strip()
+        if not s:
+            s=Supplier.query.filter_by(name=supplier_name).first()
         if not s:
             s=Supplier(name=supplier_name,nif=request.form.get("nif"),contracting_type=request.form.get("contracting_type") or "Outro / Regime especial")
             db.session.add(s); db.session.flush()
-        inv=SupplierInvoice(number=request.form["number"], supplier_id=s.id, issue_date=parse_date(request.form.get("date")),
-            due_date=parse_date(request.form.get("due_date"),None), subtotal=num(request.form.get("subtotal")), vat=num(request.form.get("vat")),
-            total=num(request.form.get("total")), paid=0, currency=request.form.get("currency") or "AOA", source_filename=data.get("filename"),
-            source_hash=data.get("hash"), raw_text="", extracted_data=json.dumps(data,ensure_ascii=False), import_confidence=int(data.get("confidence",0)))
-        inv.status="Pendente"; db.session.add(inv); db.session.commit(); flash("Fatura importada após revisão.")
-    except Exception as e: db.session.rollback(); flash("Erro ao confirmar a fatura: "+str(e))
+        framework=db.session.get(FrameworkAgreement,request.form.get("framework_id",type=int)) if request.form.get("framework_id") else None
+        contract=db.session.get(Contract,request.form.get("contract_id",type=int)) if request.form.get("contract_id") else None
+        number=request.form["number"].strip(); total=num(request.form.get("total")); subtotal=num(request.form.get("subtotal")); vat=num(request.form.get("vat")); paid=num(request.form.get("paid"))
+        if subtotal and vat and abs(subtotal+vat-total)>0.01: raise ValueError("Subtotal + IVA não corresponde ao Total.")
+        if framework and s.id not in {x.id for x in framework.suppliers.all()}: raise ValueError("O fornecedor não está associado ao Acordo-Quadro seleccionado.")
+        if contract and contract.supplier_id!=s.id: raise ValueError("O contrato seleccionado não pertence ao fornecedor.")
+        if contract and framework and contract.framework_agreement_id!=framework.id: raise ValueError("Contrato e Acordo-Quadro não correspondem.")
+        if SupplierInvoice.query.filter(SupplierInvoice.supplier_id==s.id).all() and any(_invoice_number_matches(number,i.number) for i in SupplierInvoice.query.filter_by(supplier_id=s.id).all()): raise ValueError("Já existe uma fatura com este número para o fornecedor.")
+        inv=SupplierInvoice(number=number,supplier_id=s.id,contract_id=contract.id if contract else None,framework_agreement_id=framework.id if framework else None,issue_date=parse_date(request.form.get("date")),due_date=parse_date(request.form.get("due_date"),None),subtotal=subtotal,vat=vat,total=total,paid=0,currency=request.form.get("currency") or "AOA",source_filename=data.get("filename"),source_hash=data.get("hash"),raw_text=data.get("text","")[:120000],extracted_data=json.dumps(data,ensure_ascii=False),import_confidence=int(data.get("confidence",0)))
+        db.session.add(inv); db.session.flush()
+        if paid>0:
+            method=request.form.get("payment_method") or data.get("payment_method") or "Outro"
+            if paid>total: raise ValueError("O valor pago não pode exceder o total da fatura.")
+            inv.paid=paid; inv.status="Paga" if paid>=total else "Parcial"
+            receipt=request.form.get("payment_reference") or data.get("reference") or "IMPORT-"+number
+            existing_payment=SupplierPayment.query.filter_by(invoice_id=inv.id).first()
+            if not existing_payment:
+                db.session.add(SupplierPayment(receipt=receipt,supplier_id=s.id,invoice_id=inv.id,contract_id=contract.id if contract else None,framework_agreement_id=framework.id if framework else None,date=inv.issue_date,method=method,amount=paid,reference=receipt,notes="Pagamento criado na importação inteligente após confirmação humana."))
+        os_number=request.form.get("os_number") or data.get("os_number") or ""
+        if os_number:
+            existing_os=PaymentOrder.query.filter_by(os_number=os_number,supplier_id=s.id).first()
+            if not existing_os:
+                db.session.add(PaymentOrder(os_number=os_number,supplier_id=s.id,invoice_id=inv.id,contract_id=contract.id if contract else None,framework_agreement_id=framework.id if framework else None,issue_date=inv.issue_date,amount=paid or total,status="Paga" if paid>=total and total else "Pendente",source_type="Importação inteligente",source_filename=data.get("filename"),source_hash=hashlib.sha256((str(data.get("hash"))+os_number).encode()).hexdigest(),extracted_data=json.dumps(data,ensure_ascii=False),reconciliation_status="Conferido",reconciliation_notes="OS confirmada durante a importação da fatura."))
+        db.session.commit(); run_compliance_checks(); flash("Fatura importada e reconciliada após revisão humana.")
+    except Exception as e:
+        db.session.rollback(); flash("Erro ao confirmar a fatura: "+str(e))
     return redirect(url_for("supplier_invoices"))
 
 # -----------------------------------------------------------------------------
