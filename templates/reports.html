@@ -45,14 +45,14 @@
   <div class="panelhead"><h2>Fornecedores</h2><span>PDF individual, documentos e situação financeira</span></div>
   <div style="overflow:auto">
   <table>
-    <thead><tr><th>Fornecedor</th><th>NIF</th><th>Faturado</th><th>Pago</th><th>A pagar</th><th>Faturas</th><th>Alertas</th><th>Documentos</th><th>Ações</th></tr></thead>
+    <thead><tr><th>Fornecedor</th><th>NIF</th><th>Faturado</th><th>Pago</th><th>A pagar</th><th>Faturas</th><th>Alertas</th><th>Documentos</th><th>Ordens de Saque</th><th>Ações</th></tr></thead>
     <tbody>
     {% for r in supplier_rows %}
       <tr>
-        <td><b>{{r.obj.name}}</b></td><td>{{r.obj.nif or '—'}}</td><td>Kz {{"{:,.2f}".format(r.invoiced)}}</td><td>Kz {{"{:,.2f}".format(r.paid)}}</td><td><b>Kz {{"{:,.2f}".format(r.payable)}}</b></td><td>{{r.invoice_count}}</td><td>{% if r.alert_count %}<span class="badge redbg">{{r.alert_count}}</span>{% else %}<span class="badge green">0</span>{% endif %}</td><td>{{r.document_count}}</td>
+        <td><b>{{r.obj.name}}</b></td><td>{{r.obj.nif or '—'}}</td><td>Kz {{"{:,.2f}".format(r.invoiced)}}</td><td>Kz {{"{:,.2f}".format(r.paid)}}</td><td><b>Kz {{"{:,.2f}".format(r.payable)}}</b></td><td>{{r.invoice_count}}</td><td>{% if r.alert_count %}<span class="badge redbg">{{r.alert_count}}</span>{% else %}<span class="badge green">0</span>{% endif %}</td><td>{{r.document_count}}</td><td>{{r.os_count}}</td>
         <td class="actions"><a class="btn small" href="{{ url_for('supplier_report_pdf', supplier_id=r.obj.id, status=status, framework_id=framework_id or '', contract_id=contract_id or '', start_date=start_date, end_date=end_date) }}">📄 PDF</a><a class="btn small secondary" href="{{ url_for('reports', supplier_id=r.obj.id) }}">Ver</a></td>
       </tr>
-    {% else %}<tr><td colspan="9" class="empty">Nenhum fornecedor encontrado.</td></tr>{% endfor %}
+    {% else %}<tr><td colspan="10" class="empty">Nenhum fornecedor encontrado.</td></tr>{% endfor %}
     </tbody>
   </table>
   </div>

@@ -21,3 +21,7 @@
 - O estado `Vencida` é calculado quando existe saldo e a data de vencimento é anterior à data atual.
 - O PDF individual mantém o NIF e o nome completo do fornecedor.
 - A exportação CSV utiliza campos corretamente delimitados/quotados.
+
+- Exportações de relatório agora incluem a coluna **Ordem de Saque (N.º)**, agregando todas as OS vinculadas à fatura.
+- PDFs individuais de fornecedor também exibem o número da Ordem de Saque associado a cada fatura.
+- A tela de relatórios apresenta a contagem de Ordens de Saque por fornecedor.

@@ -1777,12 +1777,12 @@ def _supplier_pdf_bytes(supplier, invoices, generated_at=None):
     summary = [["Total faturado", "Total pago", "Saldo a pagar", "N.º faturas"],
                [_pdf_money(metrics["invoiced"]), _pdf_money(metrics["paid"]), _pdf_money(metrics["payable"]), str(metrics["count"])]]
     st = Table(summary, colWidths=[44*mm]*4); st.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#f1f5f9")),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#dbe3ef")),("ALIGN",(0,0),(-1,-1),"CENTER"),("FONTSIZE",(0,0),(-1,-1),9),("PADDING",(0,0),(-1,-1),6)])); story += [st, Spacer(1, 7*mm), Paragraph("FATURAS", styles["Heading3"])]
-    data = [["Fatura","Data","Vencimento","Total","Pago","Saldo","Estado"]]
+    data = [["Fatura","Ordem de Saque (N.º)","Data","Total","Pago","Saldo","Estado"]]
     for i in invoices:
         state = "Vencida" if money(i.total) > money(i.paid) and i.due_date and i.due_date < date.today() else (i.status or "Pendente")
-        data.append([i.number, i.issue_date.strftime("%d/%m/%Y") if i.issue_date else "—", i.due_date.strftime("%d/%m/%Y") if i.due_date else "—", _pdf_money(i.total), _pdf_money(i.paid), _pdf_money(max(money(i.total)-money(i.paid),0)), state])
-    if len(data)==1: data.append(["Sem faturas para os filtros selecionados","","","","","",""])
-    ft = Table(data, repeatRows=1, colWidths=[27*mm,23*mm,25*mm,28*mm,28*mm,28*mm,24*mm])
+        data.append([i.number, _invoice_payment_order_numbers(i) or "—", i.issue_date.strftime("%d/%m/%Y") if i.issue_date else "—", _pdf_money(i.total), _pdf_money(i.paid), _pdf_money(max(money(i.total)-money(i.paid),0)), state])
+    if len(data)==1: data.append(["Sem faturas para os filtros selecionados","","","","","","",""])
+    ft = Table(data, repeatRows=1, colWidths=[30*mm,35*mm,25*mm,27*mm,27*mm,27*mm,25*mm])
     ft.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365d")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#dbe3ef")),("FONTSIZE",(0,0),(-1,-1),7.5),("PADDING",(0,0),(-1,-1),5),("VALIGN",(0,0),(-1,-1),"MIDDLE")]))
     story += [ft, Spacer(1, 7*mm), Paragraph(f"Relatório gerado automaticamente pelo ChivuGest em {generated_at.strftime('%d/%m/%Y %H:%M')}.", styles["SmallBlue"])]
     def footer(canvas, doc):
@@ -1818,13 +1818,26 @@ def reports():
     for s in suppliers:
         sinv=[i for i in invoices if i.supplier_id==s.id]
         m=_supplier_metrics(s.id, sinv)
-        supplier_rows.append({"obj":s, **m, "invoice_count":len(sinv), "alert_count":ComplianceAlert.query.filter_by(supplier_id=s.id,resolved=False).count(), "document_count":SourceDocument.query.filter_by(supplier_id=s.id).count()})
+        os_count=PaymentOrder.query.filter_by(supplier_id=s.id).count()
+        supplier_rows.append({"obj":s, **m, "invoice_count":len(sinv), "alert_count":ComplianceAlert.query.filter_by(supplier_id=s.id,resolved=False).count(), "document_count":SourceDocument.query.filter_by(supplier_id=s.id).count(), "os_count":os_count})
     return render_template("reports.html", total=total, paid=paid, payable=payable,
                            suppliers=len(suppliers), contracts=Contract.query.count(), framework_count=FrameworkAgreement.query.count(),
                            alerts=ComplianceAlert.query.filter_by(resolved=False).count(), invoices=len(invoices), procedures=ProcurementProcedure.query.count(),
                            rows=invoices, supplier_rows=supplier_rows, supplier_id=supplier_id, framework_id=framework_id, contract_id=contract_id,
                            status=status, start_date=request.args.get("start_date", ""), end_date=request.args.get("end_date", ""),
                            frameworks=frameworks, contracts_list=contracts, suppliers_list=suppliers)
+
+def _invoice_payment_order_numbers(invoice):
+    """Return the payment-order/ordem-de-saque numbers linked to an invoice.
+    Multiple OS records are preserved in one export cell, separated by '; '.
+    """
+    numbers=[]
+    for order in getattr(invoice, "payment_orders", []) or []:
+        value=(order.os_number or "").strip()
+        if value and value not in numbers:
+            numbers.append(value)
+    return "; ".join(numbers)
+
 
 def _report_export_rows(supplier_id=None, status="Todos", framework_id=None, contract_id=None, start_date=None, end_date=None):
     rows=_report_invoice_rows(supplier_id,status,framework_id,contract_id,start_date,end_date)
@@ -1837,8 +1850,8 @@ def _report_export_rows(supplier_id=None, status="Todos", framework_id=None, con
             i.framework_agreement.code if i.framework_agreement else (i.contract.framework_agreement.code if i.contract and i.contract.framework_agreement else ""),
             i.contract.number if i.contract else "",
             i.number or "",
+            _invoice_payment_order_numbers(i),
             i.issue_date.isoformat() if i.issue_date else "",
-            i.due_date.isoformat() if i.due_date else "",
             total, paid, saldo, i.status or ""
         ])
     return rows, data
@@ -1855,7 +1868,7 @@ def report_export():
     # seja colocado numa única célula quando aberto diretamente no Excel.
     out=io.StringIO(newline="")
     w=csv.writer(out, delimiter=";", quotechar='"', quoting=csv.QUOTE_MINIMAL, lineterminator="\r\n")
-    w.writerow(["Fornecedor","NIF","Acordo-Quadro","Contrato","Fatura","Data","Vencimento","Total","Pago","Saldo","Estado"])
+    w.writerow(["Fornecedor","NIF","Acordo-Quadro","Contrato","Fatura","Ordem de Saque (N.º)","Data","Total","Pago","Saldo","Estado"])
     for r in data:
         w.writerow([*r[:7], f"{r[7]:.2f}", f"{r[8]:.2f}", f"{r[9]:.2f}", r[10]])
     return Response("\ufeff"+out.getvalue(),mimetype="text/csv; charset=utf-8",headers={"Content-Disposition":"attachment; filename=chivugest_relatorio_fornecedores.csv"})
@@ -1871,10 +1884,10 @@ def report_export_xlsx():
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
     wb=Workbook(); ws=wb.active; ws.title="Relatório"
-    headers=["Fornecedor","NIF","Acordo-Quadro","Contrato","Fatura","Data","Vencimento","Total","Pago","Saldo","Estado"]
+    headers=["Fornecedor","NIF","Acordo-Quadro","Contrato","Fatura","Ordem de Saque (N.º)","Data","Total","Pago","Saldo","Estado"]
     ws.append(headers)
     for r in data:
-        ws.append(r[:7]+[r[7],r[8],r[9],r[10]])
+        ws.append(r)
     header_fill=PatternFill("solid", fgColor="17365D")
     header_font=Font(color="FFFFFF", bold=True)
     thin=Side(style="thin", color="D9E2F3")
@@ -2255,9 +2268,11 @@ def legacy_invoices():
 @app.route("/export")
 @login_required
 def export():
-    out=io.StringIO(); w=csv.writer(out); w.writerow(["Fornecedor","NIF","Fatura","Data","Vencimento","Total","Pago","Saldo","Estado"])
-    for i in SupplierInvoice.query.order_by(SupplierInvoice.issue_date).all(): w.writerow([i.supplier.name,i.supplier.nif or "",i.number,i.issue_date.isoformat(),i.due_date.isoformat() if i.due_date else "",money(i.total),money(i.paid),money(i.total)-money(i.paid),i.status])
-    return Response("\ufeff"+out.getvalue(),mimetype="text/csv",headers={"Content-Disposition":"attachment; filename=chivugest_faturas_fornecedores.csv"})
+    out=io.StringIO(newline=""); w=csv.writer(out, delimiter=";", quotechar='"', quoting=csv.QUOTE_MINIMAL, lineterminator="\r\n")
+    w.writerow(["Fornecedor","NIF","Fatura","Ordem de Saque (N.º)","Data","Total","Pago","Saldo","Estado"])
+    for i in SupplierInvoice.query.order_by(SupplierInvoice.issue_date).all():
+        w.writerow([i.supplier.name,i.supplier.nif or "",i.number,_invoice_payment_order_numbers(i),i.issue_date.isoformat(),f"{money(i.total):.2f}",f"{money(i.paid):.2f}",f"{money(i.total)-money(i.paid):.2f}",i.status])
+    return Response("\ufeff"+out.getvalue(),mimetype="text/csv; charset=utf-8",headers={"Content-Disposition":"attachment; filename=chivugest_faturas_fornecedores.csv"})
 
 @app.route("/health")
 def health(): return "OK", 200
