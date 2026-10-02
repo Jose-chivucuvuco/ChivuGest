@@ -5,7 +5,7 @@ from decimal import Decimal, InvalidOperation
 from flask import Flask, render_template, request, redirect, url_for, session, flash, Response
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
-from sqlalchemy import func, inspect, text
+from sqlalchemy import func, inspect, text, or_, and_
 from sqlalchemy.exc import IntegrityError
 
 try:
@@ -101,6 +101,7 @@ framework_supplier = db.Table(
     "framework_supplier",
     db.Column("framework_id", db.Integer, db.ForeignKey("framework_agreement.id", ondelete="CASCADE"), primary_key=True),
     db.Column("supplier_id", db.Integer, db.ForeignKey("supplier.id", ondelete="CASCADE"), primary_key=True),
+    db.Column("allocated_value", db.Numeric(18,2), nullable=False, default=0),
 )
 
 class Supplier(db.Model):
@@ -284,11 +285,13 @@ class ComplianceAlert(db.Model):
     supplier_id = db.Column(db.Integer, db.ForeignKey("supplier.id"))
     contract_id = db.Column(db.Integer, db.ForeignKey("contract.id"))
     procedure_id = db.Column(db.Integer, db.ForeignKey("procurement_procedure.id"))
+    framework_agreement_id = db.Column(db.Integer, db.ForeignKey("framework_agreement.id"))
     resolved = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     supplier = db.relationship("Supplier")
     contract = db.relationship("Contract")
     procedure = db.relationship("ProcurementProcedure")
+    framework_agreement = db.relationship("FrameworkAgreement")
 
 class LegalDocument(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -829,20 +832,73 @@ def get_rule_value(code, default):
     return float(r.value) if r and r.value is not None else default
 
 
-def add_alert(alert_type, severity, title, message, legal_basis="", supplier_id=None, contract_id=None, procedure_id=None):
+def add_alert(alert_type, severity, title, message, legal_basis="", supplier_id=None, contract_id=None, procedure_id=None, framework_agreement_id=None):
     existing = ComplianceAlert.query.filter_by(alert_type=alert_type, contract_id=contract_id,
                                                 procedure_id=procedure_id, supplier_id=supplier_id,
+                                                framework_agreement_id=framework_agreement_id,
                                                 resolved=False).first()
     if not existing:
         db.session.add(ComplianceAlert(alert_type=alert_type, severity=severity, title=title,
                                        message=message, legal_basis=legal_basis, supplier_id=supplier_id,
-                                       contract_id=contract_id, procedure_id=procedure_id))
+                                       contract_id=contract_id, procedure_id=procedure_id,
+                                       framework_agreement_id=framework_agreement_id))
 
 
 def run_compliance_checks():
+    """Rebuild the actionable compliance state without duplicating open alerts.
+
+    Financial-limit checks are data-driven: 90% is a preventive warning and
+    100% or more is a critical exception. The check deliberately preserves
+    execution percentages above 100% so overruns remain visible.
+    """
     today = date.today()
-    # Supplier-document and eligibility alerts.
-    # Contracts and expiration alerts.
+    # Framework-agreement financial controls.
+    for fa in FrameworkAgreement.query.all():
+        if fa.status == "Em vigor" and fa.end_date and fa.end_date < today:
+            add_alert("AQ_EXPIRADO", "CRITICO", "Acordo-Quadro expirado",
+                      f"O Acordo-Quadro {fa.code} terminou em {fa.end_date.strftime('%d/%m/%Y')} e continua marcado como em vigor.",
+                      "Gestão de contratação", framework_agreement_id=fa.id)
+        elif fa.status == "Em vigor" and fa.end_date:
+            fa_days = (fa.end_date - today).days
+            if fa_days <= 30:
+                add_alert("AQ_30_DIAS", "ALERTA", "Acordo-Quadro próximo do vencimento",
+                          f"O Acordo-Quadro {fa.code} vence em {fa_days} dia(s).",
+                          "Gestão de contratação", framework_agreement_id=fa.id)
+        limit = money(fa.estimated_value)
+        invoice_filter = or_(
+            SupplierInvoice.framework_agreement_id == fa.id,
+            SupplierInvoice.contract.has(Contract.framework_agreement_id == fa.id)
+        )
+        payment_filter = or_(
+            SupplierPayment.framework_agreement_id == fa.id,
+            SupplierPayment.contract.has(Contract.framework_agreement_id == fa.id)
+        )
+        invoiced = money(db.session.query(func.coalesce(func.sum(SupplierInvoice.total), 0)).filter(invoice_filter).scalar())
+        paid = money(db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).filter(payment_filter).scalar())
+        execution = (invoiced / limit * 100) if limit else 0
+        if limit and execution >= 100:
+            excess = invoiced - limit
+            add_alert("AQ_LIMITE_ULTRAPASSADO", "CRITICO", "Acordo-Quadro acima do limite",
+                      f"O Acordo-Quadro {fa.code} tem faturação de Kz {invoiced:,.2f}, acima do limite de Kz {limit:,.2f} em Kz {excess:,.2f}. Execução: {execution:.2f}%.",
+                      "Controlo financeiro do Acordo-Quadro", framework_agreement_id=fa.id)
+        elif limit and execution >= 90:
+            remaining = max(limit - invoiced, 0)
+            add_alert("AQ_PROXIMO_LIMITE", "ALERTA", "Acordo-Quadro próximo do limite",
+                      f"O Acordo-Quadro {fa.code} atingiu {execution:.2f}% de execução. Saldo disponível: Kz {remaining:,.2f}.",
+                      "Controlo financeiro do Acordo-Quadro", framework_agreement_id=fa.id)
+        if limit and paid > invoiced:
+            add_alert("AQ_PAGAMENTO_ACIMA_FATURACAO", "CRITICO", "Pagamentos acima da faturação do Acordo-Quadro",
+                      f"O Acordo-Quadro {fa.code} possui pagamentos de Kz {paid:,.2f}, superiores à faturação de Kz {invoiced:,.2f}.",
+                      "Controlo financeiro", framework_agreement_id=fa.id)
+
+        # If supplier-level allocations exist, their sum must not exceed the AQ limit.
+        allocated = money(db.session.execute(text("SELECT COALESCE(SUM(allocated_value),0) FROM framework_supplier WHERE framework_id=:fid"), {"fid": fa.id}).scalar())
+        if limit and allocated > limit:
+            add_alert("AQ_ALOCACAO_ACIMA_LIMITE", "CRITICO", "Alocação dos fornecedores acima do limite do Acordo-Quadro",
+                      f"As alocações dos fornecedores no Acordo-Quadro {fa.code} totalizam Kz {allocated:,.2f}, acima do limite global de Kz {limit:,.2f}.",
+                      "Controlo de limites do Acordo-Quadro", framework_agreement_id=fa.id)
+
+    # Contract financial and expiration controls.
     for c in Contract.query.all():
         days = (c.end_date - today).days
         if c.status == "Em vigor" and days < 0:
@@ -859,15 +915,34 @@ def run_compliance_checks():
         elif c.status == "Em vigor" and days <= 60:
             add_alert("CONTRATO_60_DIAS", "INFO", "Contrato aproxima-se do vencimento",
                       f"O contrato {c.number} vence em {days} dia(s).", "Gestão contratual", c.supplier_id, c.id)
+
+        total = money(c.current_value)
+        invoiced = money(db.session.query(func.coalesce(func.sum(SupplierInvoice.total), 0)).filter(SupplierInvoice.contract_id == c.id).scalar())
+        paid = money(db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).filter(SupplierPayment.contract_id == c.id).scalar())
+        execution = (invoiced / total * 100) if total else 0
+        if total and execution >= 100:
+            excess = invoiced - total
+            add_alert("CONTRATO_LIMITE_ULTRAPASSADO", "CRITICO", "Contrato acima do valor contratado",
+                      f"O contrato {c.number} tem faturação de Kz {invoiced:,.2f}, acima do valor actual de Kz {total:,.2f} em Kz {excess:,.2f}. Execução: {execution:.2f}%.",
+                      "Controlo financeiro do contrato", c.supplier_id, c.id)
+        elif total and execution >= 90:
+            add_alert("CONTRATO_PROXIMO_LIMITE", "ALERTA", "Contrato próximo do limite",
+                      f"O contrato {c.number} atingiu {execution:.2f}% de execução. Saldo disponível: Kz {max(total-invoiced,0):,.2f}.",
+                      "Controlo financeiro do contrato", c.supplier_id, c.id)
+        if paid > invoiced:
+            add_alert("PAGAMENTO_ACIMA_FATURA_CONTRATO", "CRITICO", "Pagamentos acima da faturação do contrato",
+                      f"O contrato {c.number} possui pagamentos de Kz {paid:,.2f}, superiores à faturação de Kz {invoiced:,.2f}.",
+                      "Controlo financeiro", c.supplier_id, c.id)
+
         if c.amendments_percent and float(c.amendments_percent) > get_rule_value("REOGE_AMEND", 15):
             add_alert("ADENDA_EXCESSIVA", "CRITICO", "Adendas acima do limite parametrizado",
                       f"O contrato {c.number} acumula {c.amendments_percent}% em adendas, acima do limite de {get_rule_value('REOGE_AMEND',15):g}%.",
                       "DP 74/26, Art. 10.º", c.supplier_id, c.id)
         if c.advance_percent:
-            limit = get_rule_value("REOGE_ADV_WORKS", 15) if c.contract_type == "Empreitada" else get_rule_value("REOGE_ADV_GOODS", 50)
-            if float(c.advance_percent) > limit:
+            limit_adv = get_rule_value("REOGE_ADV_WORKS", 15) if c.contract_type == "Empreitada" else get_rule_value("REOGE_ADV_GOODS", 50)
+            if float(c.advance_percent) > limit_adv:
                 add_alert("ADIANTAMENTO_EXCESSIVO", "CRITICO", "Adiantamento acima do limite parametrizado",
-                          f"O contrato {c.number} tem adiantamento de {c.advance_percent}%, acima do limite base de {limit:g}%.",
+                          f"O contrato {c.number} tem adiantamento de {c.advance_percent}%, acima do limite base de {limit_adv:g}%.",
                           "DP 74/26, Art. 10.º", c.supplier_id, c.id)
         if not c.cabimentado:
             add_alert("SEM_CABIMENTACAO", "CRITICO", "Contrato sem cabimentação registada",
@@ -881,6 +956,20 @@ def run_compliance_checks():
             add_alert("ALTO_VALOR", "ALERTA", "Contrato de alto valor",
                       f"O contrato {c.number} ultrapassa Kz {get_rule_value('REOGE_HIGH_VALUE',182000000):,.0f}. Rever diligências de beneficiário efetivo e documentação financeira quando legalmente solicitadas.",
                       "DP 74/26, Art. 10.º", c.supplier_id, c.id)
+
+    # Invoice/payment consistency checks.
+    for inv in SupplierInvoice.query.all():
+        payments_total = money(db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).filter(SupplierPayment.invoice_id == inv.id).scalar())
+        if payments_total > money(inv.total):
+            add_alert("PAGAMENTO_ACIMA_FATURA", "CRITICO", "Pagamento superior ao valor da fatura",
+                      f"A fatura {inv.number} tem pagamentos de Kz {payments_total:,.2f}, superiores ao total de Kz {money(inv.total):,.2f}.",
+                      "Controlo financeiro", inv.supplier_id, inv.contract_id)
+        duplicate = SupplierInvoice.query.filter(SupplierInvoice.supplier_id == inv.supplier_id, SupplierInvoice.number == inv.number, SupplierInvoice.id != inv.id).first()
+        if duplicate:
+            add_alert("FATURA_DUPLICADA", "CRITICO", "Fatura potencialmente duplicada",
+                      f"A fatura {inv.number} do fornecedor {inv.supplier.name} aparece mais de uma vez.",
+                      "Controlo de documentos financeiros", inv.supplier_id, inv.contract_id)
+
     # Procedure checks.
     level1 = get_rule_value("LCP_SIMPLIFIED", 18000000)
     level5 = get_rule_value("LCP_INVITATION", 182000000)
@@ -906,6 +995,7 @@ def run_compliance_checks():
         if not p.portal_registered:
             add_alert("PORTAL_NAO_REGISTADO", "ALERTA", "Registo no Portal não confirmado",
                       f"O procedimento {p.code} está marcado sem registo confirmado no Portal da Contratação Pública.", "Lei 41/20, Art. 12.º e regras do procedimento", p.supplier_id, None, p.id)
+
     db.session.commit()
 
 # -----------------------------------------------------------------------------
@@ -1032,42 +1122,52 @@ def logout():
 @app.route("/")
 @login_required
 def dashboard():
+    # Refresh compliance first; KPI counters must reflect alerts generated by
+    # the same request (the previous version counted before running checks).
+    run_compliance_checks()
     total_invoices = db.session.query(func.coalesce(func.sum(SupplierInvoice.total), 0)).scalar() or 0
     total_paid = db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).scalar() or 0
-    payable = float(total_invoices) - float(total_paid)
+    payable = max(float(total_invoices) - float(total_paid), 0)
     overdue = db.session.query(func.coalesce(func.sum(SupplierInvoice.total - SupplierInvoice.paid), 0)).filter(
         SupplierInvoice.due_date < date.today(), SupplierInvoice.total > SupplierInvoice.paid).scalar() or 0
-    contracts_active = Contract.query.filter_by(status="Em vigor").count()
-    framework_agreements_active = FrameworkAgreement.query.filter_by(status="Em vigor").count()
+    contracts_active = Contract.query.filter(Contract.status == "Em vigor", Contract.end_date >= date.today()).count()
+    framework_agreements_active = FrameworkAgreement.query.filter(FrameworkAgreement.status == "Em vigor", or_(FrameworkAgreement.end_date == None, FrameworkAgreement.end_date >= date.today())).count()
     expiring = Contract.query.filter(Contract.status == "Em vigor", Contract.end_date <= date.today()+timedelta(days=60), Contract.end_date >= date.today()).count()
     critical_alerts = ComplianceAlert.query.filter_by(resolved=False, severity="CRITICO").count()
     alert_count = ComplianceAlert.query.filter_by(resolved=False).count()
+    regularization_count = ComplianceAlert.query.filter(ComplianceAlert.resolved == False, ComplianceAlert.severity.in_(["CRITICO", "ALERTA"])).count()
     suppliers = Supplier.query.count()
     recent_payments = SupplierPayment.query.order_by(SupplierPayment.id.desc()).limit(8).all()
-    recent_contracts = Contract.query.order_by(Contract.end_date).limit(6).all()
+    recent_contracts = Contract.query.filter_by(status="Em vigor").order_by(Contract.end_date).limit(6).all()
 
-    # Execution of contracts: current contractual value vs invoices linked to each contract.
     contract_execution = []
     for c in Contract.query.order_by(Contract.end_date).all():
         total_value = money(c.current_value)
         executed = money(db.session.query(func.coalesce(func.sum(SupplierInvoice.total), 0)).filter(SupplierInvoice.contract_id == c.id).scalar())
         paid = money(db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).filter(SupplierPayment.contract_id == c.id).scalar())
-        remaining = max(total_value - executed, 0)
+        balance = total_value - executed
+        remaining = max(balance, 0)
+        excess = max(-balance, 0)
         execution_pct = (executed / total_value * 100) if total_value else 0
-        contract_execution.append({"obj": c, "total": total_value, "executed": executed, "paid": paid, "remaining": remaining, "execution": execution_pct})
+        contract_execution.append({"obj": c, "total": total_value, "executed": executed, "paid": paid,
+                                   "remaining": remaining, "excess": excess, "execution": execution_pct})
 
-    # Execution of Acordos-Quadro: estimated/limit value vs all invoices carrying
-    # the framework relation (including invoices that came through linked contracts).
     framework_execution = []
     for fa in FrameworkAgreement.query.order_by(FrameworkAgreement.code).all():
         total_value = money(fa.estimated_value)
-        executed = money(db.session.query(func.coalesce(func.sum(SupplierInvoice.total), 0)).filter(SupplierInvoice.framework_agreement_id == fa.id).scalar())
-        paid = money(db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).filter(SupplierPayment.framework_agreement_id == fa.id).scalar())
-        remaining = max(total_value - executed, 0)
+        invoice_filter = or_(SupplierInvoice.framework_agreement_id == fa.id,
+                             SupplierInvoice.contract.has(Contract.framework_agreement_id == fa.id))
+        payment_filter = or_(SupplierPayment.framework_agreement_id == fa.id,
+                             SupplierPayment.contract.has(Contract.framework_agreement_id == fa.id))
+        executed = money(db.session.query(func.coalesce(func.sum(SupplierInvoice.total), 0)).filter(invoice_filter).scalar())
+        paid = money(db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).filter(payment_filter).scalar())
+        balance = total_value - executed
+        remaining = max(balance, 0)
+        excess = max(-balance, 0)
         execution_pct = (executed / total_value * 100) if total_value else 0
-        framework_execution.append({"obj": fa, "total": total_value, "executed": executed, "paid": paid, "remaining": remaining, "execution": execution_pct})
+        framework_execution.append({"obj": fa, "total": total_value, "executed": executed, "paid": paid,
+                                    "remaining": remaining, "excess": excess, "execution": execution_pct})
 
-    # Company/supplier analysis: consolidates contractual and financial execution per company.
     company_analysis = []
     for s in Supplier.query.order_by(Supplier.name).all():
         contract_value = money(db.session.query(func.coalesce(func.sum(Contract.current_value), 0)).filter(Contract.supplier_id == s.id).scalar())
@@ -1075,18 +1175,18 @@ def dashboard():
         paid = money(db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).filter(SupplierPayment.supplier_id == s.id).scalar())
         fa_count = db.session.query(func.count(func.distinct(framework_supplier.c.framework_id))).filter(framework_supplier.c.supplier_id == s.id).scalar() or 0
         contract_count = Contract.query.filter_by(supplier_id=s.id).count()
-        execution_pct = (invoiced / contract_value * 100) if contract_value else 0
+        execution_pct = (invoiced / contract_value * 100) if contract_value else None
         company_analysis.append({"obj": s, "framework_count": int(fa_count), "contract_count": contract_count, "contract_value": contract_value,
-                                 "invoiced": invoiced, "paid": paid, "payable": max(invoiced-paid,0), "execution": min(max(execution_pct,0),100)})
+                                 "invoiced": invoiced, "paid": paid, "payable": max(invoiced-paid,0), "execution": execution_pct})
+
     monthly = db.session.query(func.extract("year", SupplierPayment.date).label("y"), func.extract("month", SupplierPayment.date).label("m"), func.sum(SupplierPayment.amount).label("v")).group_by("y","m").order_by("y","m").all()
     months = [{"label": f"{int(r.y):04d}-{int(r.m):02d}", "value": float(r.v or 0)} for r in monthly]
     maxv = max([m["value"] for m in months], default=0)
     for m in months: m["height"] = 20 + (m["value"]/(maxv or 1))*180
-    run_compliance_checks()
     latest_backup = BackupRecord.query.order_by(BackupRecord.created_at.desc()).first()
     return render_template("dashboard.html", total_invoices=total_invoices, total_paid=total_paid, payable=payable,
                            overdue=overdue, contracts_active=contracts_active, framework_agreements_active=framework_agreements_active, expiring=expiring,
-                           critical_alerts=critical_alerts, alert_count=alert_count, suppliers=suppliers,
+                           critical_alerts=critical_alerts, alert_count=alert_count, regularization_count=regularization_count, suppliers=suppliers,
                            recent_payments=recent_payments, recent_contracts=recent_contracts, contract_execution=contract_execution, framework_execution=framework_execution,
                            company_analysis=company_analysis, months=months, latest_backup=latest_backup)
 
@@ -1124,8 +1224,7 @@ def supplier_analysis():
         invoiced = money(db.session.query(func.coalesce(func.sum(SupplierInvoice.total), 0)).filter(SupplierInvoice.supplier_id == s.id).scalar())
         paid = money(db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).filter(SupplierPayment.supplier_id == s.id).scalar())
         payable = max(invoiced - paid, 0)
-        execution = (invoiced / contract_value * 100) if contract_value else 0
-        execution = min(max(execution, 0), 100)
+        execution = (invoiced / contract_value * 100) if contract_value else None
         fa_count = db.session.query(func.count(func.distinct(framework_supplier.c.framework_id))).filter(framework_supplier.c.supplier_id == s.id).scalar() or 0
         companies.append({"obj": s, "framework_count": int(fa_count), "contract_count": contract_count, "active_contract_count": active_contract_count,
                           "contract_value": contract_value, "invoiced": invoiced, "paid": paid, "payable": payable, "execution": execution})
@@ -1139,11 +1238,13 @@ def supplier_analysis():
                 SupplierInvoice.supplier_id == selected.id, SupplierInvoice.framework_agreement_id == fa.id).scalar())
             fa_paid = money(db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).filter(
                 SupplierPayment.supplier_id == selected.id, SupplierPayment.framework_agreement_id == fa.id).scalar())
-            fa_total = money(fa.estimated_value)
+            allocation = money(db.session.execute(text("SELECT COALESCE(allocated_value,0) FROM framework_supplier WHERE framework_id=:fid AND supplier_id=:sid"), {"fid": fa.id, "sid": selected.id}).scalar())
+            fa_total = allocation
             fa_remaining = max(fa_total - fa_invoiced, 0)
-            fa_exec = (fa_invoiced / fa_total * 100) if fa_total else 0
+            fa_excess = max(fa_invoiced - fa_total, 0)
+            fa_exec = (fa_invoiced / fa_total * 100) if fa_total else None
             detail_frameworks.append({"obj": fa, "total": fa_total, "invoiced": fa_invoiced, "paid": fa_paid,
-                                     "remaining": fa_remaining, "execution": min(max(fa_exec, 0), 100)})
+                                     "remaining": fa_remaining, "excess": fa_excess, "execution": fa_exec})
 
         detail_contracts = []
         for c in Contract.query.filter_by(supplier_id=selected.id).order_by(Contract.end_date, Contract.number).all():
@@ -1151,9 +1252,10 @@ def supplier_analysis():
             c_invoiced = money(db.session.query(func.coalesce(func.sum(SupplierInvoice.total), 0)).filter(SupplierInvoice.contract_id == c.id).scalar())
             c_paid = money(db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).filter(SupplierPayment.contract_id == c.id).scalar())
             c_remaining = max(c_total - c_invoiced, 0)
-            c_exec = (c_invoiced / c_total * 100) if c_total else 0
+            c_excess = max(c_invoiced - c_total, 0)
+            c_exec = (c_invoiced / c_total * 100) if c_total else None
             detail_contracts.append({"obj": c, "total": c_total, "invoiced": c_invoiced, "paid": c_paid,
-                                     "remaining": c_remaining, "execution": min(max(c_exec, 0), 100)})
+                                     "remaining": c_remaining, "excess": c_excess, "execution": c_exec})
 
         detail_invoices = SupplierInvoice.query.filter_by(supplier_id=selected.id).order_by(SupplierInvoice.issue_date.desc(), SupplierInvoice.id.desc()).all()
         detail_payments = SupplierPayment.query.filter_by(supplier_id=selected.id).order_by(SupplierPayment.date.desc(), SupplierPayment.id.desc()).all()
@@ -1176,7 +1278,7 @@ def supplier_analysis():
         "paid": sum(c["paid"] for c in companies),
     }
     totals["payable"] = max(totals["invoiced"] - totals["paid"], 0)
-    totals["execution"] = (totals["invoiced"] / totals["contract_value"] * 100) if totals["contract_value"] else 0
+    totals["execution"] = (totals["invoiced"] / totals["contract_value"] * 100) if totals["contract_value"] else None
     return render_template("supplier_analysis.html", companies=companies, suppliers=suppliers_list, selected=selected, totals=totals, selected_detail=selected_detail)
 
 # -----------------------------------------------------------------------------
@@ -1196,6 +1298,9 @@ def supplier_invoices():
             total = num(request.form["total"])
             if total <= 0:
                 raise ValueError("O valor da fatura deve ser superior a zero.")
+            duplicate_invoice = SupplierInvoice.query.filter_by(supplier_id=int(request.form["supplier_id"]), number=request.form["number"].strip()).first()
+            if duplicate_invoice:
+                raise ValueError("Já existe uma fatura com este número para o fornecedor seleccionado.")
 
             contract = db.session.get(Contract, int(request.form["contract_id"])) if request.form.get("contract_id") else None
             framework_id = int(request.form["framework_agreement_id"]) if request.form.get("framework_agreement_id") else None
@@ -1276,7 +1381,10 @@ def supplier_payments():
                 raise ValueError("O contrato e o Acordo-Quadro seleccionados não correspondem entre si.")
 
             if inv:
-                inv.paid = money(inv.paid) + amount
+                current_paid = money(inv.paid)
+                if current_paid + amount > money(inv.total):
+                    raise ValueError(f"O pagamento de Kz {amount:,.2f} ultrapassa o saldo disponível da fatura (Kz {max(money(inv.total)-current_paid,0):,.2f}).")
+                inv.paid = current_paid + amount
                 inv.status = "Paga" if inv.paid >= inv.total else "Parcial"
             p = SupplierPayment(receipt=request.form["receipt"], supplier_id=supplier_id,
                                 invoice_id=inv.id if inv else None,
@@ -1372,6 +1480,7 @@ def current_account():
 @login_required
 def framework_agreements():
     suppliers_list = Supplier.query.order_by(Supplier.name).all()
+    procedures = ["Concurso Limitado por Convite", "Concurso Público", "Contratação Simplificada", "Concurso Limitado por Prévia Qualificação", "Procedimento de Contratação Emergencial"]
     if request.method == "POST":
         try:
             code=request.form["code"].strip()
@@ -1392,12 +1501,16 @@ def framework_agreements():
                 if s: selected.append(s)
             if not selected: raise ValueError("Associe pelo menos um fornecedor ao Acordo-Quadro.")
             fa.suppliers.extend(selected)
-            db.session.add(fa); db.session.commit()
+            db.session.add(fa); db.session.flush()
+            for supplier in selected:
+                allocation = num(request.form.get(f"supplier_limit_{supplier.id}"))
+                db.session.execute(text("UPDATE framework_supplier SET allocated_value=:v WHERE framework_id=:fid AND supplier_id=:sid"), {"v": allocation, "fid": fa.id, "sid": supplier.id})
+            db.session.commit()
             flash(f"Acordo-Quadro {fa.code} criado com {len(selected)} fornecedor(es).")
         except Exception as e:
             db.session.rollback(); flash("Erro ao criar Acordo-Quadro: "+str(e))
     rows=FrameworkAgreement.query.order_by(FrameworkAgreement.id.desc()).all()
-    return render_template("framework_agreements.html", rows=rows, suppliers=suppliers_list)
+    return render_template("framework_agreements.html", rows=rows, suppliers=suppliers_list, procedures=procedures)
 
 @app.route("/framework-agreements/<int:fa_id>/edit", methods=["GET", "POST"])
 @login_required
@@ -1407,6 +1520,7 @@ def edit_framework_agreement(fa_id):
         flash("Acordo-Quadro não encontrado.")
         return redirect(url_for("framework_agreements"))
     suppliers_list = Supplier.query.order_by(Supplier.name).all()
+    allocations = {int(r["supplier_id"]): money(r["allocated_value"]) for r in db.session.execute(text("SELECT supplier_id, allocated_value FROM framework_supplier WHERE framework_id=:fid"), {"fid": fa.id}).mappings()}
     if request.method == "POST":
         try:
             code = request.form["code"].strip()
@@ -1439,6 +1553,11 @@ def edit_framework_agreement(fa_id):
             fa.document_ref = request.form.get("document_ref")
             fa.notes = request.form.get("notes")
             fa.suppliers = [s for s in suppliers_list if s.id in selected_ids]
+            db.session.flush()
+            for supplier in suppliers_list:
+                if supplier.id in selected_ids:
+                    allocation = num(request.form.get(f"supplier_limit_{supplier.id}"))
+                    db.session.execute(text("UPDATE framework_supplier SET allocated_value=:v WHERE framework_id=:fid AND supplier_id=:sid"), {"v": allocation, "fid": fa.id, "sid": supplier.id})
             db.session.commit()
             flash(f"Acordo-Quadro {fa.code} actualizado com sucesso.")
             return redirect(url_for("framework_agreements"))
@@ -1446,7 +1565,7 @@ def edit_framework_agreement(fa_id):
             db.session.rollback()
             flash("Erro ao actualizar Acordo-Quadro: " + str(e))
     procedures = ["Concurso Limitado por Convite", "Concurso Público", "Contratação Simplificada", "Concurso Limitado por Prévia Qualificação", "Procedimento de Contratação Emergencial"]
-    return render_template("framework_agreement_edit.html", fa=fa, suppliers=suppliers_list, procedures=procedures)
+    return render_template("framework_agreement_edit.html", fa=fa, suppliers=suppliers_list, procedures=procedures, allocations=allocations)
 
 @app.route("/contracts", methods=["GET", "POST"])
 @login_required
@@ -1896,6 +2015,8 @@ def ensure_schema():
     add_column("supplier_invoice", "framework_agreement_id", "INTEGER")
     add_column("supplier_payment", "framework_agreement_id", "INTEGER")
     add_column("payment_order", "framework_agreement_id", "INTEGER")
+    add_column("framework_supplier", "allocated_value", "NUMERIC(18,2) NOT NULL DEFAULT 0")
+    add_column("compliance_alert", "framework_agreement_id", "INTEGER")
     add_column("supplier", "contracting_type", "VARCHAR(80)")
     # Existing suppliers remain valid; this field is now legacy and no longer used by the UI.
     with db.engine.begin() as conn:

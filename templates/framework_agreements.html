@@ -6,7 +6,7 @@
 <label>Início<input name="start_date" type="date"></label><label>Fim<input name="end_date" type="date"></label><input name="estimated_value" type="number" step="0.01" min="0" placeholder="Valor estimado / limite (Kz)">
 <input name="document_ref" placeholder="Referência do documento / arquivo"><input name="legal_basis" placeholder="Fundamento legal"><select name="status"><option>Em vigor</option><option>Por regularizar</option><option>Concluído</option><option>Expirado</option><option>Suspenso</option></select>
 <div class="section-title">Fornecedores participantes</div>
-<div style="grid-column:1/-1"><input id="supplierSearch" placeholder="Pesquisar fornecedor..." style="margin-bottom:10px;width:100%"><div style="max-height:260px;overflow:auto;border:1px solid #dbe3ef;border-radius:8px;padding:10px">{% for s in suppliers %}<label class="check framework-supplier" data-name="{{s.name|lower}}"><input type="checkbox" name="supplier_ids" value="{{s.id}}"> {{s.name}}{% if s.nif %} — {{s.nif}}{% endif %}</label>{% endfor %}</div></div>
+<div style="grid-column:1/-1"><input id="supplierSearch" placeholder="Pesquisar fornecedor..." style="margin-bottom:10px;width:100%"><div style="max-height:260px;overflow:auto;border:1px solid #dbe3ef;border-radius:8px;padding:10px">{% for s in suppliers %}<label class="check framework-supplier" data-name="{{s.name|lower}}" style="display:grid;grid-template-columns:auto 1fr 180px;gap:8px;align-items:center"><input type="checkbox" name="supplier_ids" value="{{s.id}}"> <span>{{s.name}}{% if s.nif %} — {{s.nif}}{% endif %}</span><input name="supplier_limit_{{s.id}}" type="number" step="0.01" min="0" placeholder="Limite atribuído (Kz)"></label>{% endfor %}</div></div>
 <textarea name="notes" placeholder="Observações"></textarea><button>Criar Acordo-Quadro</button></form></div>
 <div class="panel"><div class="panelhead"><h2>Acordos-Quadro registados</h2><span>{{rows|length}}</span></div>
 <table>
@@ -21,7 +21,7 @@
 </tr>
 {% else %}<tr><td colspan="9" class="empty">Nenhum Acordo-Quadro registado.</td></tr>{% endfor %}
 </table>
-<p class="form-help">O número de contratos associados pode ser <b>0</b>. O Acordo-Quadro é uma entidade autónoma; os contratos são registados posteriormente quando existirem.</p>
+<p class="form-help">O número de contratos associados pode ser <b>0</b>. O Acordo-Quadro é uma entidade autónoma. O limite atribuído por fornecedor é opcional; quando não informado, a execução individual da empresa será apresentada como <b>N/D</b>, evitando percentagens fictícias.</p>
 </div>
 <script>document.getElementById('supplierSearch').addEventListener('input',function(){const q=this.value.toLowerCase();document.querySelectorAll('.framework-supplier').forEach(x=>x.style.display=x.dataset.name.includes(q)?'flex':'none')});</script>
 {% endblock %}

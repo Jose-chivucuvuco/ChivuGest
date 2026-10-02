@@ -3,3 +3,5 @@
 .form-help{grid-column:1/-1;color:#64748b;font-size:12px;background:#f8fafc;border:1px solid #e5eaf0;padding:10px;border-radius:9px}.section-title{grid-column:1/-1;font-size:12px;font-weight:850;color:#1e3a5f;background:#eff6ff;border-left:4px solid #2563eb;padding:9px 11px;border-radius:8px;margin-top:4px}.panel form>button{grid-column:1/-1;justify-self:start}.panelhead span{font-size:12px;color:#64748b}
 .progress{height:7px;background:#e7edf7;border-radius:999px;overflow:hidden}.progress span{display:block;height:100%;background:#2563eb;border-radius:999px}
 .nested-panel{box-shadow:none;background:#fbfcfe;padding:14px}.company-profile table{font-size:12px}.company-profile th{font-size:9px}.company-profile .metric strong{font-size:19px}.company-profile a:not(.btn){font-weight:650}.company-profile small{color:#64748b}
+
+.danger-text{color:#dc2626;font-weight:800}.barwrap b{display:block;color:#475569;margin-top:3px}
