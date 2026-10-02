@@ -1904,10 +1904,13 @@ def import_payment_documents():
             # operations for every row and keeps large DocFonte imports predictable.
             raw_upload = f.read()
             upload_hash = hashlib.sha256(raw_upload).hexdigest()
-            class _Upload:
-                def __init__(self, name, data): self.filename=name; self._data=data
-                def read(self): return self._data
-            rows=uploaded_rows(_Upload(f.filename, raw_upload))
+            # openpyxl may call seek()/tell() on the uploaded stream.  A custom
+            # wrapper exposing only read() is not seekable and causes:
+            # "_Upload object has no attribute 'seek'".  Use a real in-memory
+            # binary stream instead; this is also compatible with CSV handling.
+            upload_stream = io.BytesIO(raw_upload)
+            upload_stream.filename = f.filename
+            rows=uploaded_rows(upload_stream)
             if not rows:
                 raise ValueError("O ficheiro não contém linhas de dados reconhecíveis.")
             if len(rows) >= int(os.environ.get("CHIVUGEST_IMPORT_MAX_ROWS", "5000")):
