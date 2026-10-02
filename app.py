@@ -2494,6 +2494,7 @@ def analyze_invoice_import(data):
     paid_match=SupplierPayment.query.filter_by(invoice_id=invoice_match.id).all() if invoice_match else []
     paid_amount=sum(money(x.amount) for x in paid_match)
     issues=[]
+    warnings=[]
     if not supplier: issues.append("Fornecedor não encontrado no cadastro.")
     if not number: issues.append("Número da fatura não reconhecido.")
     if not data.get("date"): issues.append("Data da fatura não reconhecida.")
@@ -2508,10 +2509,23 @@ def analyze_invoice_import(data):
     if framework:
         limit=money(framework.estimated_value)
         if limit and amount:
-            existing=money(db.session.query(func.coalesce(func.sum(SupplierInvoice.total),0)).filter(SupplierInvoice.framework_agreement_id==framework.id).scalar())
+            # O controlo de limite é um ALERTA de conformidade, não um bloqueio.
+            # Quando estamos a rever uma fatura já existente, ela não pode ser
+            # somada novamente ao projetado (evita o falso aumento por duplicidade).
+            q=db.session.query(func.coalesce(func.sum(SupplierInvoice.total),0)).filter(SupplierInvoice.framework_agreement_id==framework.id)
+            if invoice_match:
+                q=q.filter(SupplierInvoice.id != invoice_match.id)
+            existing=money(q.scalar())
             if contract and contract.framework_agreement_id==framework.id:
-                existing=money(db.session.query(func.coalesce(func.sum(SupplierInvoice.total),0)).filter(SupplierInvoice.contract.has(Contract.framework_agreement_id==framework.id)).scalar())
-            if existing+amount>limit: issues.append(f"Faturação projetada de Kz {existing+amount:,.2f} ultrapassa o limite do Acordo-Quadro de Kz {limit:,.2f}.")
+                q2=db.session.query(func.coalesce(func.sum(SupplierInvoice.total),0)).filter(
+                    SupplierInvoice.contract.has(Contract.framework_agreement_id==framework.id)
+                )
+                if invoice_match:
+                    q2=q2.filter(SupplierInvoice.id != invoice_match.id)
+                existing=money(q2.scalar())
+            projected=existing+amount
+            if projected>limit:
+                warnings.append(f"Faturação projetada de Kz {projected:,.2f} ultrapassa o limite do Acordo-Quadro de Kz {limit:,.2f}. Este é um alerta de conformidade e não impede a gravação da fatura.")
     confidence=int(data.get("confidence") or 0)
     confidence=min(100, confidence + (10 if supplier else 0) + (5 if framework else 0) + (5 if contract else 0) + (5 if os_match else 0))
     os_number_match = ""
@@ -2520,7 +2534,7 @@ def analyze_invoice_import(data):
     # Importação de fatura é documental. Pagamento/OS são apenas dados de reconciliação
     # e nunca devem ser tratados como campos reconhecidos pelo OCR nem gravados como
     # uma nova operação de pagamento nesta etapa.
-    data.update({"supplier_id":supplier.id if supplier else None,"supplier_match":supplier_match,"framework_id":framework.id if framework else None,"contract_id":contract.id if contract else None,"os_match_id":os_match.id if os_match else None,"os_match_number":os_number_match or "","paid_match_amount":paid_amount,"payment_match_found":bool(paid_match or os_match),"contracting_type":(supplier.contracting_type if supplier else ""),"duplicate":bool(duplicate_hash or invoice_match),"matched_invoice_id":invoice_match.id if invoice_match else None,"math_ok":math_ok,"issues":issues,"review_required":bool(issues),"confidence":min(confidence,100)})
+    data.update({"supplier_id":supplier.id if supplier else None,"supplier_match":supplier_match,"framework_id":framework.id if framework else None,"contract_id":contract.id if contract else None,"os_match_id":os_match.id if os_match else None,"os_match_number":os_number_match or "","paid_match_amount":paid_amount,"payment_match_found":bool(paid_match or os_match),"contracting_type":(supplier.contracting_type if supplier else ""),"duplicate":bool(duplicate_hash or invoice_match),"matched_invoice_id":invoice_match.id if invoice_match else None,"math_ok":math_ok,"issues":issues,"warnings":warnings,"review_required":bool(issues),"confidence":min(confidence,100)})
     return data
 
 # -----------------------------------------------------------------------------
