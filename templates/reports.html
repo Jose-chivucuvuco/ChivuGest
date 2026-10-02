@@ -1,1 +1,77 @@
-{% extends "base.html" %}{% block content %}<div class="pagehead"><div><h1>Relatórios</h1><p class="muted">Indicadores de fornecedores, faturas, pagamentos, contratos e conformidade.</p></div><a class="btn" href="/reports/export">Exportar CSV</a></div><section class="cards six"><div class="metric"><small>FATURADO</small><strong>Kz {{"{:,.2f}".format(total)}}</strong></div><div class="metric"><small>PAGO</small><strong>Kz {{"{:,.2f}".format(paid)}}</strong></div><div class="metric"><small>A PAGAR</small><strong>Kz {{"{:,.2f}".format(payable)}}</strong></div><div class="metric"><small>FORNECEDORES</small><strong>{{suppliers}}</strong></div><div class="metric"><small>CONTRATOS</small><strong>{{contracts}}</strong></div><div class="metric danger"><small>ALERTAS ABERTOS</small><strong>{{alerts}}</strong></div></section><div class="panel"><h2>Relatórios disponíveis</h2><ul class="clean"><li>Mapa de faturas de fornecedores</li><li>Mapa de pagamentos e saldos</li><li>Conta corrente por fornecedor</li><li>Contratos em vigor e por regularizar</li><li>Procedimentos de contratação pública</li><li>Alertas de conformidade legal</li></ul></div>{% endblock %}
+{% extends "base.html" %}
+{% block content %}
+<div class="pagehead">
+  <div><h1>Relatórios</h1><p class="muted">Indicadores de fornecedores, faturas, pagamentos, contratos e conformidade.</p></div>
+  <div class="actions">
+    <a class="btn secondary" href="{{ url_for('reports_pdf') }}">📄 PDF consolidado</a>
+    <a class="btn secondary" href="{{ url_for('suppliers_report_zip', supplier_id=supplier_id or '') }}">📦 PDFs por fornecedor</a>
+    <a class="btn" href="{{ url_for('report_export', supplier_id=supplier_id or '', framework_id=framework_id or '', contract_id=contract_id or '', status=status, start_date=start_date, end_date=end_date) }}">Exportar CSV</a>
+  </div>
+</div>
+
+<section class="cards seven">
+  <div class="metric"><small>FATURADO</small><strong>Kz {{"{:,.2f}".format(total)}}</strong></div>
+  <div class="metric"><small>PAGO</small><strong>Kz {{"{:,.2f}".format(paid)}}</strong></div>
+  <div class="metric"><small>A PAGAR</small><strong>Kz {{"{:,.2f}".format(payable)}}</strong></div>
+  <div class="metric"><small>FORNECEDORES</small><strong>{{suppliers}}</strong></div>
+  <div class="metric"><small>ACORDOS-QUADRO</small><strong>{{framework_count}}</strong></div>
+  <div class="metric"><small>CONTRATOS</small><strong>{{contracts}}</strong></div>
+  <div class="metric danger"><small>ALERTAS ABERTOS</small><strong>{{alerts}}</strong></div>
+</section>
+
+<div class="panel" style="margin-top:16px">
+  <div class="panelhead"><h2>Filtros de relatório</h2><a href="{{ url_for('reports') }}">Limpar filtros</a></div>
+  <form method="get" class="form">
+    <label>Fornecedor<select name="supplier_id"><option value="">Todos</option>{% for s in suppliers_list %}<option value="{{s.id}}" {% if supplier_id==s.id %}selected{% endif %}>{{s.name}}{% if s.nif %} — {{s.nif}}{% endif %}</option>{% endfor %}</select></label>
+    <label>Acordo-Quadro<select name="framework_id"><option value="">Todos</option>{% for f in frameworks %}<option value="{{f.id}}" {% if framework_id==f.id %}selected{% endif %}>{{f.code}}</option>{% endfor %}</select></label>
+    <label>Contrato<select name="contract_id"><option value="">Todos</option>{% for c in contracts_list %}<option value="{{c.id}}" {% if contract_id==c.id %}selected{% endif %}>{{c.number}} — {{c.supplier.name}}</option>{% endfor %}</select></label>
+    <label>Estado<select name="status"><option {% if status=='Todos' %}selected{% endif %}>Todos</option><option {% if status=='Pendente' %}selected{% endif %}>Pendente</option><option {% if status=='Parcial' %}selected{% endif %}>Parcial</option><option {% if status=='Paga' %}selected{% endif %}>Paga</option><option {% if status=='Vencida' %}selected{% endif %}>Vencida</option></select></label>
+    <label>Data inicial<input type="date" name="start_date" value="{{start_date}}"></label>
+    <label>Data final<input type="date" name="end_date" value="{{end_date}}"></label>
+    <button>Aplicar filtros</button>
+  </form>
+</div>
+
+<div class="panel" style="margin-top:16px">
+  <div class="panelhead"><h2>Relatórios disponíveis</h2><span>{{invoices}} fatura(s) no filtro atual</span></div>
+  <div class="grid2">
+    <ul class="clean"><li>Mapa de faturas de fornecedores</li><li>Mapa de pagamentos e saldos</li><li>Conta corrente por fornecedor</li></ul>
+    <ul class="clean"><li>Contratos em vigor e por regularizar</li><li>Procedimentos de contratação pública</li><li>Alertas de conformidade legal</li></ul>
+  </div>
+</div>
+
+<div class="panel" style="margin-top:16px">
+  <div class="panelhead"><h2>Fornecedores</h2><span>PDF individual, documentos e situação financeira</span></div>
+  <div style="overflow:auto">
+  <table>
+    <thead><tr><th>Fornecedor</th><th>NIF</th><th>Faturado</th><th>Pago</th><th>A pagar</th><th>Faturas</th><th>Alertas</th><th>Documentos</th><th>Ações</th></tr></thead>
+    <tbody>
+    {% for r in supplier_rows %}
+      <tr>
+        <td><b>{{r.obj.name}}</b></td><td>{{r.obj.nif or '—'}}</td><td>Kz {{"{:,.2f}".format(r.invoiced)}}</td><td>Kz {{"{:,.2f}".format(r.paid)}}</td><td><b>Kz {{"{:,.2f}".format(r.payable)}}</b></td><td>{{r.invoice_count}}</td><td>{% if r.alert_count %}<span class="badge redbg">{{r.alert_count}}</span>{% else %}<span class="badge green">0</span>{% endif %}</td><td>{{r.document_count}}</td>
+        <td class="actions"><a class="btn small" href="{{ url_for('supplier_report_pdf', supplier_id=r.obj.id, status=status, framework_id=framework_id or '', contract_id=contract_id or '', start_date=start_date, end_date=end_date) }}">📄 PDF</a><a class="btn small secondary" href="{{ url_for('reports', supplier_id=r.obj.id) }}">Ver</a></td>
+      </tr>
+    {% else %}<tr><td colspan="9" class="empty">Nenhum fornecedor encontrado.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<div class="grid2" style="margin-top:16px">
+  <div class="panel">
+    <h2>Importar PDF por fornecedor</h2>
+    <p class="muted">Associe faturas, contratos, acordos ou comprovativos ao fornecedor. O PDF é guardado com hash, metadados extraídos e controlo de duplicação.</p>
+    <form method="post" action="{{ url_for('report_document_upload') }}" enctype="multipart/form-data" class="form">
+      <label>Fornecedor<select name="supplier_id" required><option value="">Seleccione...</option>{% for s in suppliers_list %}<option value="{{s.id}}" {% if supplier_id==s.id %}selected{% endif %}>{{s.name}}</option>{% endfor %}</select></label>
+      <label>Tipo de documento<select name="document_type"><option>Fatura</option><option>Contrato</option><option>Acordo-Quadro</option><option>Nota de Crédito</option><option>Comprovativo de Pagamento</option><option>Outro</option></select></label>
+      <label>PDF<input type="file" name="file" accept="application/pdf,.pdf" required></label>
+      <button>Importar PDF e associar</button>
+    </form>
+  </div>
+  <div class="panel">
+    <h2>Exportação documental</h2>
+    <p class="muted">O ChivuGest mantém os mesmos dados entre a tela, CSV e PDF. Os nomes dos fornecedores com vírgulas são preservados corretamente no CSV.</p>
+    <div class="actions"><a class="btn" href="{{ url_for('reports_pdf') }}">📄 PDF consolidado</a><a class="btn secondary" href="{{ url_for('suppliers_report_zip') }}">📦 ZIP de PDFs</a></div>
+  </div>
+</div>
+{% endblock %}

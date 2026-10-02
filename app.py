@@ -2,9 +2,10 @@ import os, csv, io, re, json, hashlib, secrets, unicodedata, urllib.request, url
 from datetime import datetime, date, timedelta
 from functools import wraps
 from decimal import Decimal, InvalidOperation
-from flask import Flask, render_template, request, redirect, url_for, session, flash, Response
+from flask import Flask, render_template, request, redirect, url_for, session, flash, Response, send_file, abort
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.datastructures import FileStorage
 from sqlalchemy import func, inspect, text, or_, and_
 from sqlalchemy.exc import IntegrityError
 
@@ -21,6 +22,15 @@ try:
 except ImportError:
     load_workbook = None
 from PIL import Image
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
@@ -252,14 +262,21 @@ class SourceDocument(db.Model):
     document_type = db.Column(db.String(50), nullable=False)
     document_number = db.Column(db.String(120), index=True)
     supplier_id = db.Column(db.Integer, db.ForeignKey("supplier.id"))
+    invoice_id = db.Column(db.Integer, db.ForeignKey("supplier_invoice.id"))
+    contract_id = db.Column(db.Integer, db.ForeignKey("contract.id"))
+    framework_agreement_id = db.Column(db.Integer, db.ForeignKey("framework_agreement.id"))
     source_filename = db.Column(db.String(255), nullable=False)
     source_hash = db.Column(db.String(64), unique=True, nullable=False)
     issue_date = db.Column(db.Date)
     amount = db.Column(db.Numeric(18,2), default=0)
     extracted_data = db.Column(db.Text)
     import_confidence = db.Column(db.Integer, default=0)
+    content = db.Column(db.LargeBinary)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     supplier = db.relationship("Supplier", backref="source_documents")
+    invoice = db.relationship("SupplierInvoice", backref="source_documents")
+    contract = db.relationship("Contract", backref="source_documents")
+    framework_agreement = db.relationship("FrameworkAgreement", backref="source_documents")
 
 class LegalRule(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -586,7 +603,42 @@ def uploaded_rows(f):
         except csv.Error:
             dialect = csv.excel
             dialect.delimiter = ";" if ";" in sample else ","
-        return [{normalize_key(k): v for k, v in row.items()} for row in csv.DictReader(io.StringIO(s), dialect=dialect)]
+        # Parse rows explicitly so malformed legacy exports are recoverable.
+        # Standard CSV remains fully supported, including quoted supplier names
+        # such as "CASA NOVA - HOME & OFFICE, LDA".
+        records=list(csv.reader(io.StringIO(s), dialect=dialect))
+        if not records: return []
+        headers=[normalize_key(x) for x in records[0]]
+        out=[]
+        for row in records[1:]:
+            if not any(str(x).strip() for x in row): continue
+            if len(row)==len(headers):
+                out.append(dict(zip(headers,row))); continue
+            # Repair the legacy ChivuGest 11-column report where commas inside
+            # supplier names and an extra numeric zero shifted the columns.
+            expected={"fornecedor","nif","acordo_quadro","contrato","fatura","data","vencimento","total","pago","saldo","estado"}
+            if set(headers)==expected and len(row)>len(headers):
+                nif_idx=next((idx for idx,v in enumerate(row) if re.fullmatch(r"\d{8,14}",str(v).strip())),None)
+                if nif_idx is not None and nif_idx>=1:
+                    supplier=", ".join(str(v).strip() for v in row[:nif_idx]).strip()
+                    tail=row[nif_idx:]
+                    # After NIF, the first seven fields through Total are stable.
+                    # Recalculate Saldo from Total-Pago rather than trusting the
+                    # shifted legacy columns.
+                    if len(tail)>=10:
+                        data=dict(zip(headers, [supplier]+tail[:10]))
+                        data["fornecedor"]=supplier; data["nif"]=tail[0]
+                        try:
+                            total_val=num(data.get("total")); paid_val=num(data.get("pago"))
+                            data["saldo"]=f"{max(total_val-paid_val,0):.2f}"
+                            data["estado"]=str(row[-1]).strip() or ("Paga" if total_val<=paid_val else "Pendente")
+                            out.append(data); continue
+                        except Exception:
+                            pass
+            # Conservative fallback: keep the first columns rather than silently
+            # assigning a shifted NIF or amount to another business field.
+            out.append(dict(zip(headers,row[:len(headers)])))
+        return out
     raise ValueError("Para tabelas use CSV/XLSX. Para documentos use PDF/imagem.")
 
 def extract_generic_source_document(file_storage):
@@ -1673,25 +1725,191 @@ def resolve_alert(aid):
     return redirect(url_for("alerts"))
 
 # -----------------------------------------------------------------------------
+# Reports helpers / PDF generation
+# -----------------------------------------------------------------------------
+def _report_invoice_rows(supplier_id=None, status=None, framework_id=None, contract_id=None, start_date=None, end_date=None):
+    q = SupplierInvoice.query
+    if supplier_id: q = q.filter(SupplierInvoice.supplier_id == supplier_id)
+    if framework_id:
+        q = q.filter(or_(SupplierInvoice.framework_agreement_id == framework_id,
+                         SupplierInvoice.contract.has(Contract.framework_agreement_id == framework_id)))
+    if contract_id: q = q.filter(SupplierInvoice.contract_id == contract_id)
+    if start_date: q = q.filter(SupplierInvoice.issue_date >= start_date)
+    if end_date: q = q.filter(SupplierInvoice.issue_date <= end_date)
+    rows = q.order_by(SupplierInvoice.issue_date, SupplierInvoice.number).all()
+    if status and status != "Todos":
+        if status == "Vencida":
+            rows = [i for i in rows if money(i.total) > money(i.paid) and i.due_date and i.due_date < date.today()]
+        else:
+            rows = [i for i in rows if (i.status or "Pendente") == status]
+    return rows
+
+
+def _supplier_metrics(supplier_id, invoices=None):
+    invoices = invoices if invoices is not None else _report_invoice_rows(supplier_id=supplier_id)
+    invoiced = sum((money(i.total) for i in invoices), 0.0)
+    paid = sum((money(i.paid) for i in invoices), 0.0)
+    # Invoice.paid is used for report consistency, including filtered periods.
+    # SupplierPayment remains the detailed reconciliation source in the payment module.
+    return {"invoiced": invoiced, "paid": paid, "payable": max(invoiced-paid, 0.0), "count": len(invoices)}
+
+
+def _pdf_money(v):
+    return f"Kz {money(v):,.2f}".replace(",", " ")
+
+
+def _supplier_pdf_bytes(supplier, invoices, generated_at=None):
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError("A biblioteca reportlab não está instalada.")
+    generated_at = generated_at or datetime.now()
+    metrics = _supplier_metrics(supplier.id, invoices)
+    buf = io.BytesIO()
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="SmallBlue", parent=styles["Normal"], fontSize=8.5, textColor=colors.HexColor("#1e3a5f")))
+    styles.add(ParagraphStyle(name="TitleBlue", parent=styles["Title"], fontSize=18, leading=22, textColor=colors.HexColor("#17365d")))
+    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=16*mm, leftMargin=16*mm, topMargin=15*mm, bottomMargin=15*mm,
+                            title=f"Relatório - {supplier.name}", author="ChivuGest")
+    story = [Paragraph("CHIVUGEST", styles["TitleBlue"]),
+             Paragraph("RELATÓRIO DE CONTA CORRENTE DO FORNECEDOR", styles["Heading2"]), Spacer(1, 5*mm)]
+    info = [["Fornecedor", supplier.name], ["NIF", supplier.nif or "—"],
+            ["Categoria", supplier.category or "—"], ["Data de emissão", generated_at.strftime("%d/%m/%Y %H:%M")]]
+    t = Table(info, colWidths=[42*mm, 135*mm]); t.setStyle(TableStyle([("BACKGROUND",(0,0),(0,-1),colors.HexColor("#eff6ff")),("FONTNAME",(0,0),(-1,-1),"Helvetica"),("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#dbe3ef")),("VALIGN",(0,0),(-1,-1),"TOP"),("FONTSIZE",(0,0),(-1,-1),9),("PADDING",(0,0),(-1,-1),6)])); story += [t, Spacer(1, 6*mm)]
+    summary = [["Total faturado", "Total pago", "Saldo a pagar", "N.º faturas"],
+               [_pdf_money(metrics["invoiced"]), _pdf_money(metrics["paid"]), _pdf_money(metrics["payable"]), str(metrics["count"])]]
+    st = Table(summary, colWidths=[44*mm]*4); st.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#f1f5f9")),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#dbe3ef")),("ALIGN",(0,0),(-1,-1),"CENTER"),("FONTSIZE",(0,0),(-1,-1),9),("PADDING",(0,0),(-1,-1),6)])); story += [st, Spacer(1, 7*mm), Paragraph("FATURAS", styles["Heading3"])]
+    data = [["Fatura","Data","Vencimento","Total","Pago","Saldo","Estado"]]
+    for i in invoices:
+        state = "Vencida" if money(i.total) > money(i.paid) and i.due_date and i.due_date < date.today() else (i.status or "Pendente")
+        data.append([i.number, i.issue_date.strftime("%d/%m/%Y") if i.issue_date else "—", i.due_date.strftime("%d/%m/%Y") if i.due_date else "—", _pdf_money(i.total), _pdf_money(i.paid), _pdf_money(max(money(i.total)-money(i.paid),0)), state])
+    if len(data)==1: data.append(["Sem faturas para os filtros selecionados","","","","","",""])
+    ft = Table(data, repeatRows=1, colWidths=[27*mm,23*mm,25*mm,28*mm,28*mm,28*mm,24*mm])
+    ft.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365d")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#dbe3ef")),("FONTSIZE",(0,0),(-1,-1),7.5),("PADDING",(0,0),(-1,-1),5),("VALIGN",(0,0),(-1,-1),"MIDDLE")]))
+    story += [ft, Spacer(1, 7*mm), Paragraph(f"Relatório gerado automaticamente pelo ChivuGest em {generated_at.strftime('%d/%m/%Y %H:%M')}.", styles["SmallBlue"])]
+    def footer(canvas, doc):
+        canvas.saveState(); canvas.setFont("Helvetica",7); canvas.setFillColor(colors.HexColor("#64748b")); canvas.drawString(16*mm, 8*mm, "ChivuGest — Gestão empresarial, fornecedores, contratos e conformidade"); canvas.drawRightString(194*mm, 8*mm, f"Página {doc.page}"); canvas.restoreState()
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    buf.seek(0); return buf.getvalue()
+
+
+def _safe_filename(value):
+    value = unicodedata.normalize("NFKD", value or "fornecedor").encode("ascii", "ignore").decode("ascii")
+    value = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("_")
+    return value or "fornecedor"
+
+# -----------------------------------------------------------------------------
 # Reports
 # -----------------------------------------------------------------------------
 @app.route("/reports")
 @login_required
 def reports():
-    total=money(db.session.query(func.coalesce(func.sum(SupplierInvoice.total),0)).scalar())
-    paid=money(db.session.query(func.coalesce(func.sum(SupplierPayment.amount),0)).scalar())
-    return render_template("reports.html", total=total, paid=paid, payable=total-paid,
-                           suppliers=Supplier.query.count(), contracts=Contract.query.count(), procedures=ProcurementProcedure.query.count(),
-                           alerts=ComplianceAlert.query.filter_by(resolved=False).count(), invoices=SupplierInvoice.query.count())
+    run_compliance_checks()
+    supplier_id=request.args.get("supplier_id", type=int)
+    framework_id=request.args.get("framework_id", type=int)
+    contract_id=request.args.get("contract_id", type=int)
+    status=request.args.get("status", "Todos")
+    start_date=parse_date(request.args.get("start_date"), None)
+    end_date=parse_date(request.args.get("end_date"), None)
+    invoices=_report_invoice_rows(supplier_id, status, framework_id, contract_id, start_date, end_date)
+    total=sum((money(i.total) for i in invoices), 0.0); paid=sum((money(i.paid) for i in invoices), 0.0); payable=max(total-paid,0.0)
+    suppliers=Supplier.query.order_by(Supplier.name).all()
+    frameworks=FrameworkAgreement.query.order_by(FrameworkAgreement.code).all()
+    contracts=Contract.query.order_by(Contract.number).all()
+    supplier_rows=[]
+    for s in suppliers:
+        sinv=[i for i in invoices if i.supplier_id==s.id]
+        m=_supplier_metrics(s.id, sinv)
+        supplier_rows.append({"obj":s, **m, "invoice_count":len(sinv), "alert_count":ComplianceAlert.query.filter_by(supplier_id=s.id,resolved=False).count(), "document_count":SourceDocument.query.filter_by(supplier_id=s.id).count()})
+    return render_template("reports.html", total=total, paid=paid, payable=payable,
+                           suppliers=len(suppliers), contracts=Contract.query.count(), framework_count=FrameworkAgreement.query.count(),
+                           alerts=ComplianceAlert.query.filter_by(resolved=False).count(), invoices=len(invoices), procedures=ProcurementProcedure.query.count(),
+                           rows=invoices, supplier_rows=supplier_rows, supplier_id=supplier_id, framework_id=framework_id, contract_id=contract_id,
+                           status=status, start_date=request.args.get("start_date", ""), end_date=request.args.get("end_date", ""),
+                           frameworks=frameworks, contracts_list=contracts, suppliers_list=suppliers)
 
 @app.route("/reports/export")
 @login_required
 def report_export():
-    out=io.StringIO(); w=csv.writer(out)
+    supplier_id=request.args.get("supplier_id", type=int); status=request.args.get("status", "Todos")
+    framework_id=request.args.get("framework_id", type=int); contract_id=request.args.get("contract_id", type=int)
+    start_date=parse_date(request.args.get("start_date"), None); end_date=parse_date(request.args.get("end_date"), None)
+    rows=_report_invoice_rows(supplier_id,status,framework_id,contract_id,start_date,end_date)
+    out=io.StringIO(newline=""); w=csv.writer(out, quoting=csv.QUOTE_MINIMAL)
     w.writerow(["Fornecedor","NIF","Acordo-Quadro","Contrato","Fatura","Data","Vencimento","Total","Pago","Saldo","Estado"])
-    for i in SupplierInvoice.query.order_by(SupplierInvoice.issue_date).all():
-        w.writerow([i.supplier.name,i.supplier.nif or "",i.framework_agreement.code if i.framework_agreement else (i.contract.framework_agreement.code if i.contract and i.contract.framework_agreement else ""),i.contract.number if i.contract else "",i.number,i.issue_date.isoformat(),i.due_date.isoformat() if i.due_date else "",money(i.total),money(i.paid),money(i.total)-money(i.paid),i.status])
+    for i in rows:
+        w.writerow([i.supplier.name,i.supplier.nif or "",i.framework_agreement.code if i.framework_agreement else (i.contract.framework_agreement.code if i.contract and i.contract.framework_agreement else ""),i.contract.number if i.contract else "",i.number,i.issue_date.isoformat() if i.issue_date else "",i.due_date.isoformat() if i.due_date else "",f"{money(i.total):.2f}",f"{money(i.paid):.2f}",f"{max(money(i.total)-money(i.paid),0):.2f}",i.status])
     return Response("\ufeff"+out.getvalue(),mimetype="text/csv",headers={"Content-Disposition":"attachment; filename=chivugest_relatorio_fornecedores.csv"})
+
+@app.route("/reports/supplier/<int:supplier_id>/pdf")
+@login_required
+def supplier_report_pdf(supplier_id):
+    supplier=db.session.get(Supplier,supplier_id)
+    if not supplier: abort(404)
+    rows=_report_invoice_rows(supplier_id=supplier_id, status=request.args.get("status","Todos"), framework_id=request.args.get("framework_id",type=int), contract_id=request.args.get("contract_id",type=int), start_date=parse_date(request.args.get("start_date"),None), end_date=parse_date(request.args.get("end_date"),None))
+    raw=_supplier_pdf_bytes(supplier,rows)
+    return send_file(io.BytesIO(raw),mimetype="application/pdf",as_attachment=True,download_name=f"Relatorio_{_safe_filename(supplier.name)}.pdf")
+
+@app.route("/reports/suppliers/pdf-zip")
+@login_required
+def suppliers_report_zip():
+    import zipfile
+    supplier_ids=request.args.getlist("supplier_id", type=int)
+    suppliers=Supplier.query.filter(Supplier.id.in_(supplier_ids)).order_by(Supplier.name).all() if supplier_ids else Supplier.query.order_by(Supplier.name).all()
+    buf=io.BytesIO()
+    with zipfile.ZipFile(buf,"w",zipfile.ZIP_DEFLATED) as z:
+        for s in suppliers:
+            rows=_report_invoice_rows(supplier_id=s.id, status=request.args.get("status","Todos"), framework_id=request.args.get("framework_id",type=int), contract_id=request.args.get("contract_id",type=int), start_date=parse_date(request.args.get("start_date"),None), end_date=parse_date(request.args.get("end_date"),None))
+            z.writestr(f"Relatorio_{_safe_filename(s.name)}.pdf",_supplier_pdf_bytes(s,rows))
+    buf.seek(0)
+    return send_file(buf,mimetype="application/zip",as_attachment=True,download_name="ChivuGest_Relatorios_Fornecedores.zip")
+
+@app.route("/reports/pdf")
+@login_required
+def reports_pdf():
+    suppliers=Supplier.query.order_by(Supplier.name).all()
+    rows=[]
+    for s in suppliers:
+        inv=_report_invoice_rows(supplier_id=s.id)
+        m=_supplier_metrics(s.id,inv)
+        rows.append((s,m))
+    if not REPORTLAB_AVAILABLE: abort(500, description="reportlab não instalado")
+    # Consolidated PDF is a single document with one supplier section per page.
+    buf=io.BytesIO(); doc=SimpleDocTemplate(buf,pagesize=A4,rightMargin=16*mm,leftMargin=16*mm,topMargin=15*mm,bottomMargin=15*mm,title="Relatório consolidado ChivuGest")
+    styles=getSampleStyleSheet(); story=[Paragraph("CHIVUGEST — RELATÓRIO CONSOLIDADO DE FORNECEDORES",styles["Title"]),Spacer(1,6*mm)]
+    for idx,(s,m) in enumerate(rows):
+        if idx: story.append(PageBreak())
+        story += [Paragraph(s.name,styles["Heading2"]), Paragraph(f"NIF: {s.nif or '—'}",styles["Normal"]),Spacer(1,4*mm),
+                  Table([["Faturado","Pago","A pagar","Faturas"],[ _pdf_money(m["invoiced"]),_pdf_money(m["paid"]),_pdf_money(m["payable"]),str(m["count"])]],colWidths=[44*mm]*4)]
+    doc.build(story); buf.seek(0)
+    return send_file(buf,mimetype="application/pdf",as_attachment=True,download_name="ChivuGest_Relatorio_Consolidado.pdf")
+
+@app.route("/reports/documents/upload", methods=["POST"])
+@login_required
+def report_document_upload():
+    f=request.files.get("file"); supplier_id=request.form.get("supplier_id",type=int); document_type=request.form.get("document_type","Documento")
+    if not f or not f.filename or not supplier_id: flash("Seleccione o fornecedor e o documento PDF."); return redirect(url_for("reports"))
+    supplier=db.session.get(Supplier,supplier_id)
+    if not supplier: flash("Fornecedor inválido."); return redirect(url_for("reports"))
+    if not f.filename.lower().endswith(".pdf"): flash("A importação documental nesta área aceita apenas PDF."); return redirect(url_for("reports",supplier_id=supplier_id))
+    raw=f.read(); digest=hashlib.sha256(raw).hexdigest()
+    try:
+        if SourceDocument.query.filter_by(source_hash=digest).first(): raise ValueError("Este PDF já foi importado.")
+        parsed=extract_pdf_or_image(FileStorage(stream=io.BytesIO(raw), filename=f.filename, content_type=f.mimetype or "application/pdf"))
+        doc=SourceDocument(document_type=document_type,document_number=parsed.get("number"),supplier_id=supplier_id,source_filename=f.filename,source_hash=digest,issue_date=parse_date(parsed.get("date"),None),amount=num(parsed.get("total")),extracted_data=json.dumps(parsed,ensure_ascii=False),import_confidence=int(parsed.get("confidence",0)),content=raw)
+        inv_id=request.form.get("invoice_id",type=int)
+        if inv_id:
+            inv=db.session.get(SupplierInvoice,inv_id)
+            if inv and inv.supplier_id==supplier_id: doc.invoice_id=inv.id
+        db.session.add(doc); db.session.commit(); flash(f"PDF '{f.filename}' importado e associado a {supplier.name}.")
+    except Exception as e:
+        db.session.rollback(); flash("Erro ao importar PDF: "+str(e))
+    return redirect(url_for("reports",supplier_id=supplier_id))
+
+@app.route("/reports/documents/<int:doc_id>/download")
+@login_required
+def report_document_download(doc_id):
+    doc=db.session.get(SourceDocument,doc_id)
+    if not doc or not doc.content: abort(404)
+    return send_file(io.BytesIO(doc.content),mimetype="application/pdf",as_attachment=True,download_name=doc.source_filename)
 
 # -----------------------------------------------------------------------------
 # Robust import centre
@@ -2018,6 +2236,11 @@ def ensure_schema():
     add_column("framework_supplier", "allocated_value", "NUMERIC(18,2) NOT NULL DEFAULT 0")
     add_column("compliance_alert", "framework_agreement_id", "INTEGER")
     add_column("supplier", "contracting_type", "VARCHAR(80)")
+    # Document repository fields: keep PDFs associated with suppliers and optional financial/contract records.
+    add_column("source_document", "invoice_id", "INTEGER")
+    add_column("source_document", "contract_id", "INTEGER")
+    add_column("source_document", "framework_agreement_id", "INTEGER")
+    add_column("source_document", "content", "BYTEA" if db.engine.dialect.name == "postgresql" else "BLOB")
     # Existing suppliers remain valid; this field is now legacy and no longer used by the UI.
     with db.engine.begin() as conn:
         conn.execute(text("UPDATE supplier SET contracting_type='Não aplicável' WHERE contracting_type IS NULL OR contracting_type=''"))
