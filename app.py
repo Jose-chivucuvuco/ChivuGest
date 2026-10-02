@@ -505,69 +505,139 @@ def regex_first(text_value, patterns):
     return ""
 
 
-def parse_invoice_text(text_value):
-    """Extract invoice fields from native PDF text or OCR text.
+def _last_money_after_label(text_value, labels):
+    """Return the last monetary value appearing after one of the labels.
 
-    OCR frequently loses labels/accents and invoice layouts vary considerably,
-    so the parser deliberately uses several fallbacks instead of requiring a
-    label such as ``Fornecedor:`` to be present.
+    Invoice summaries normally repeat TOTAL/IVA several times. Using the last
+    labelled occurrence prevents the item-table quantity/price from being
+    mistaken for the invoice total.
+    """
+    if not text_value:
+        return ""
+    label_alt = "|".join(labels)
+    patterns = [
+        rf"(?:{label_alt})\s*[:=\-]?\s*(?:AOA|KZ|AKZ)?\s*([0-9][0-9 .,'-]{{1,}})",
+        rf"(?:{label_alt})[^\n\r]*?([0-9][0-9 .,'-]{{1,}})\s*$",
+    ]
+    found=[]
+    for pat in patterns:
+        found.extend(re.findall(pat, text_value, re.I | re.M))
+    return found[-1].strip() if found else ""
+
+
+def _extract_invoice_number(text_value):
+    """Extract the business invoice number from common Angolan invoice headers.
+
+    Example OCR: ``Fatura Nº FT FC2025A/1 971 MINSAUDE``. The actual business
+    number is 1971; OCR has split the four digits after the slash. Prefer the
+    numeric component after the slash and join separated digit groups.
+    """
+    lines=[re.sub(r"[ \t]+", " ", x).strip() for x in text_value.splitlines() if x.strip()]
+    for line in lines:
+        if re.search(r"\b(?:fatura|factura|invoice)\s*(?:n[ºo°]?|no|numero|número)\b", line, re.I):
+            tail=re.split(r"\b(?:fatura|factura|invoice)\s*(?:n[ºo°]?|no|numero|número)\s*", line, maxsplit=1, flags=re.I)[-1].strip(" :#-")
+            # After a slash, OCR may split 1971 as "1 971".
+            m=re.search(r"/\s*(\d(?:[\d ]{2,}))", tail)
+            if m:
+                digits=re.sub(r"\D", "", m.group(1))
+                if digits:
+                    return digits
+            # Prefer an explicit FT/FA/FAC token followed by a numeric suffix.
+            nums=re.findall(r"\d(?:[\d ]{2,})", tail)
+            if nums:
+                digits=[re.sub(r"\D", "", x) for x in nums]
+                digits=[x for x in digits if x]
+                if digits:
+                    return digits[-1]
+            m=re.search(r"\b(?:FT|FA|FAC|FR|INV)[\s./_-]*([A-Z0-9./_-]+)", tail, re.I)
+            if m:
+                return m.group(0).strip()
+    return regex_first(text_value, [
+        r"\b((?:FT|FA|FR|FAC|INV)[\s./_-]*[A-Z0-9_-]{1,})\b",
+        r"(?:n[ºo°]|no|número|numero)\s*[:#-]?\s*([A-Z0-9./_-]{2,})"
+    ])
+
+
+def parse_invoice_text(text_value):
+    """Extract invoice fields from native PDF text or OCR text robustly.
+
+    The parser is deliberately conservative: it uses invoice-summary labels
+    before generic TOTAL/IVA matches and never treats a salesperson name or
+    an isolated OCR word such as ``tal`` as an invoice/payment field.
     """
     text_value = normalize_text(text_value)
     lines=[re.sub(r"[ \t]+", " ", x).strip() for x in text_value.splitlines() if x.strip()]
-    upper="\n".join(lines)
 
-    number = regex_first(text_value, [
-        r"(?:fatura|factura|invoice|documento)\s*(?:n[ºo°]?|no|numero|número|number)?\s*[:#-]?\s*([A-Z]{0,5}[A-Z0-9./_-]{1,})",
-        r"(?:n[ºo°]|no|número|numero)\s*[:#-]?\s*([A-Z0-9./_-]{2,})",
-        r"\b((?:FT|FA|FR|FAC|INV)[\s./_-]*[A-Z0-9_-]{1,})\b"
+    number = _extract_invoice_number(text_value)
+
+    nif = regex_first(text_value, [
+        r"(?:N\.\s*[ºo°]?\s*)?(?:Contribuinte|Contribuyente|NIF|NUIT|N\.I\.F\.|N I F)\s*[:#-]?\s*([0-9][0-9 .-]{7,14})",
+        r"(?:N\.\s*Contribuinte|NIF|NUIT)\s*[:#-]?\s*([0-9][0-9 .-]{7,14})",
     ])
-    nif = regex_first(text_value, [r"(?:NIF|NUIT|N\.I\.F\.|N I F)\s*[:#-]?\s*([0-9][0-9 .-]{7,14})"])
     nif = re.sub(r"\D", "", nif)
 
-    supplier = regex_first(text_value, [
-        r"(?:fornecedor|supplier|emitente|vendedor|benefici[aá]rio)\s*[:#-]\s*([^\n\r]{3,160})",
-        r"(?:nome|name)\s*[:#-]\s*([^\n\r]{3,160})"
-    ])
-    supplier = supplier.strip(" :-|;")
-    # Header fallback: many invoices print the legal name without a label.
+    # Prefer the legal name in the document header. This avoids capturing
+    # "Vendedor: Bernardo Xavier" as the supplier.
+    supplier = ""
+    for line in lines[:20]:
+        clean=re.sub(r"[^A-Za-zÀ-ÿ0-9& .,'()\-/]", "", line).strip(" -")
+        if (re.search(r"\b(?:LDA|S\.A\.?|SA|SU|E\.P\.?|EP|LIMITADA)\b", clean, re.I)
+            and len(clean) >= 6
+            and not re.search(r"(?:fatura|factura|invoice|vendedor|propriet[aá]rio|nif|iban|data|total|iva)", clean, re.I)):
+            supplier=re.sub(r"\s+V$", "", clean).strip()
+            break
     if not supplier:
-        for line in lines[:25]:
-            clean=re.sub(r"[^A-Za-zÀ-ÿ0-9& .,'()\-]", "", line).strip()
-            if (re.search(r"\b(?:LDA|S\.A\.?|SA|SU|E\.P\.?|EP|LIMITADA)\b", clean, re.I)
-                and len(clean) >= 6 and not re.search(r"(?:fatura|factura|invoice|nif|iban|data|total|iva)", clean, re.I)):
-                supplier=clean
-                break
+        supplier = regex_first(text_value, [
+            r"(?:fornecedor|supplier|emitente|benefici[aá]rio)\s*[:#-]\s*([^\n\r]{3,160})",
+            r"(?:nome|name)\s*[:#-]\s*([^\n\r]{3,160})"
+        ]).strip(" :-|;")
 
     dates = re.findall(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})\b", text_value)
-    # Label-aware date fallback, then first date as issue date.
-    labeled_dates=re.findall(r"(?:data|date|emiss[aã]o|emissao|vencimento|due)\s*[:#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})", text_value, re.I)
-    total = regex_first(text_value, [
-        r"(?:total\s+a\s+pagar|total\s+da\s+fatura|total\s+factura|total\s+fatura|grand\s+total|valor\s+total|total\s+geral|total)\s*[:=\-]?\s*(?:AOA|KZ|AKZ)?\s*([0-9][0-9 .,'-]{1,})",
-        r"(?:valor\s+a\s+pagar|montante|a\s+pagar)\s*[:=\-]?\s*(?:AOA|KZ|AKZ)?\s*([0-9][0-9 .,'-]{1,})"
+    issue_date = regex_first(text_value, [r"(?:data\s+da\s+fatura|data|date|emiss[aã]o|emissao)\s*[:#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})"])
+    due_date = regex_first(text_value, [r"(?:data\s+vencimento|vencimento|due\s+date|due)\s*[:#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})"])
+
+    # Invoice summary: these labels are much safer than the first TOTAL line
+    # because the item table itself also contains the word TOTAL.
+    subtotal = _last_money_after_label(text_value, [
+        r"total\s+il[ií]quido", r"total\s+liquido", r"montante\s+tribut[aá]vel", r"subtotal", r"base\s+tribut[aá]vel"
     ])
-    subtotal = regex_first(text_value, [r"(?:subtotal|total\s+liquido|total\s+líquido|base\s+tribut[aá]vel)\s*[:=\-]?\s*(?:AOA|KZ|AKZ)?\s*([0-9][0-9 .,'-]{1,})"])
-    vat = regex_first(text_value, [r"(?:IVA|VAT)\s*(?:\([0-9]+(?:[.,][0-9]+)?%\))?\s*[:=\-]?\s*(?:AOA|KZ|AKZ)?\s*([0-9][0-9 .,'-]{1,})"])
-    # Fallback for invoices where the amount appears immediately after the word TOTAL.
+    vat = _last_money_after_label(text_value, [r"montante\s+iva", r"iva"])
+    total = _last_money_after_label(text_value, [r"total\s+a\s+pagar", r"total\s+factura", r"total\s+da\s+fatura", r"total\s+da\s+factura", r"grand\s+total"])
     if not total:
+        # Only as a final fallback use a generic TOTAL and take the last match.
+        total = _last_money_after_label(text_value, [r"total"])
+
+    # If the summary is printed as a row: "14 20 614 000,05 2 885 960,01 23 499 960,06",
+    # recover the three values from the line containing IVA % / Montante Tributável.
+    if (not subtotal or not vat or not total):
         for line in lines:
-            if re.search(r"\bTOTAL\b", line, re.I):
-                m=re.search(r"(?:TOTAL[^0-9]{0,20})([0-9][0-9 .,'-]{2,})", line, re.I)
-                if m:
-                    total=m.group(1); break
+            if re.search(r"\bIVA\s*%\b|Montante Tribut[aá]vel", line, re.I):
+                vals=re.findall(r"\d[\d .,'-]{2,}", line)
+                parsed=[num(v) for v in vals if num(v)>0]
+                if len(parsed)>=3:
+                    subtotal=subtotal or vals[-3]
+                    vat=vat or vals[-2]
+                    total=total or vals[-1]
+                    break
+
     iban = regex_first(text_value, [r"\b([A-Z]{2}\d{2}[A-Z0-9 ]{10,34})\b"])
     currency = "AOA" if re.search(r"\b(?:KZ|AOA|AKZ|KWANZA|KWANZAS)\b", text_value, re.I) else ""
     framework = regex_first(text_value, [r"(?:acordo[- ]?quadro|framework\s+agreement|aq)\s*(?:n[ºo°]?|no|numero|number)?\s*[:#=-]?\s*([A-Z0-9./_-]+)"])
     contract = regex_first(text_value, [r"(?:contrato|contract)\s*(?:n[ºo°]?|no|numero|number)?\s*[:#=-]?\s*([A-Z0-9./_-]+)"])
+
+    # Do not infer an Ordem de Saque from arbitrary OCR text. Only accept an
+    # explicit OS/Ordem de Saque label followed by a numeric/alphanumeric id.
     os_number = regex_first(text_value, [
-        r"(?:ordem\s+de\s+s[aá]que|ordem\s+s[aá]que|order\s+of\s+payment|O\.?S\.?)\s*(?:n[ºo°]?|no|numero|number)?\s*[:#=-]?\s*([A-Z0-9./_-]+)",
-        r"\b(OS\s*(?:N[ºo°]?\s*)?[0-9]{2,})\b"
+        r"(?:ordem\s+de\s+s[aá]que|ordem\s+s[aá]que|order\s+of\s+payment)\s*(?:n[ºo°]?|no|numero|number)?\s*[:#=-]?\s*(\d{2,})",
+        r"\bO\.?S\.?\s*(?:N[ºo°]?\s*)?(\d{2,})\b"
     ])
     payment_method = regex_first(text_value, [r"(?:meio\s+de\s+pagamento|m[eé]todo\s+de\s+pagamento|payment\s+method)\s*[:#=-]?\s*([^\n]{2,60})"])
     reference = regex_first(text_value, [r"(?:refer[eê]ncia|reference)\s*[:#=-]?\s*([A-Z0-9./_-]+)"])
+
     data = {
         "number": number, "supplier": supplier, "nif": nif,
-        "date": labeled_dates[0] if labeled_dates else (dates[0] if dates else ""),
-        "due_date": labeled_dates[1] if len(labeled_dates)>1 else (dates[1] if len(dates)>1 else ""),
+        "date": issue_date or (dates[0] if dates else ""),
+        "due_date": due_date or (dates[1] if len(dates)>1 else ""),
         "subtotal": num(subtotal), "vat": num(vat), "total": num(total), "currency": currency,
         "iban": iban.replace(" ", ""), "framework_agreement": framework, "contract": contract,
         "os_number": os_number, "payment_method": payment_method, "reference": reference, "text": text_value
@@ -2387,16 +2457,40 @@ def analyze_invoice_import(data):
         else:
             same_amount=[i for i in duplicates if abs(money(i.total)-amount)<=0.01]
             if len(same_amount)==1: invoice_match=same_amount[0]
+
+    # If the imported document did not print AQ/contract, inherit them only
+    # from an unambiguous existing invoice match. This is reconciliation, not
+    # OCR guessing.
+    if invoice_match:
+        framework = framework or invoice_match.framework_agreement
+        contract = contract or invoice_match.contract
+
     os_match=None
     if supplier:
+        # 1) Native PaymentOrder records.
         for order in PaymentOrder.query.filter_by(supplier_id=supplier.id).all():
-            if number and order.invoice_id and _invoice_number_matches(number, order.invoice.number):
+            if number and order.invoice_id and order.invoice and _invoice_number_matches(number, order.invoice.number):
                 os_match=order; break
             if number:
                 try: od=json.loads(order.extracted_data or "{}")
                 except Exception: od={}
                 if _invoice_number_matches(number, od.get("invoice_number")): os_match=order; break
             if amount and abs(money(order.amount)-amount)<=0.01 and not os_match: os_match=order
+
+        # 2) Legacy/normal Payments where the medium is "Ordem de Saque"
+        # and the OS number is stored in receipt/reference.
+        if os_match is None:
+            payments=SupplierPayment.query.filter_by(supplier_id=supplier.id).all()
+            for pay in payments:
+                if not _is_order_of_payment(pay.method):
+                    continue
+                if invoice_match and pay.invoice_id == invoice_match.id:
+                    os_match=pay; break
+                if number and pay.invoice and _invoice_number_matches(number, pay.invoice.number):
+                    os_match=pay; break
+                if amount and abs(money(pay.amount)-amount)<=0.01:
+                    os_match=pay; break
+
     paid_match=SupplierPayment.query.filter_by(invoice_id=invoice_match.id).all() if invoice_match else []
     paid_amount=sum(money(x.amount) for x in paid_match)
     issues=[]
@@ -2420,7 +2514,13 @@ def analyze_invoice_import(data):
             if existing+amount>limit: issues.append(f"Faturação projetada de Kz {existing+amount:,.2f} ultrapassa o limite do Acordo-Quadro de Kz {limit:,.2f}.")
     confidence=int(data.get("confidence") or 0)
     confidence=min(100, confidence + (10 if supplier else 0) + (5 if framework else 0) + (5 if contract else 0) + (5 if os_match else 0))
-    data.update({"supplier_id":supplier.id if supplier else None,"supplier_match":supplier_match,"framework_id":framework.id if framework else None,"contract_id":contract.id if contract else None,"os_match_id":os_match.id if os_match else None,"os_match_number":os_match.os_number if os_match else (data.get("os_number") or ""),"paid_match_amount":paid_amount,"duplicate":bool(duplicate_hash or invoice_match),"math_ok":math_ok,"issues":issues,"review_required":bool(issues),"confidence":min(confidence,100)})
+    os_number_match = ""
+    if os_match:
+        os_number_match = getattr(os_match, "os_number", "") or getattr(os_match, "receipt", "") or getattr(os_match, "reference", "") or ""
+    # Importação de fatura é documental. Pagamento/OS são apenas dados de reconciliação
+    # e nunca devem ser tratados como campos reconhecidos pelo OCR nem gravados como
+    # uma nova operação de pagamento nesta etapa.
+    data.update({"supplier_id":supplier.id if supplier else None,"supplier_match":supplier_match,"framework_id":framework.id if framework else None,"contract_id":contract.id if contract else None,"os_match_id":os_match.id if os_match else None,"os_match_number":os_number_match or "","paid_match_amount":paid_amount,"payment_match_found":bool(paid_match or os_match),"contracting_type":(supplier.contracting_type if supplier else ""),"duplicate":bool(duplicate_hash or invoice_match),"matched_invoice_id":invoice_match.id if invoice_match else None,"math_ok":math_ok,"issues":issues,"review_required":bool(issues),"confidence":min(confidence,100)})
     return data
 
 # -----------------------------------------------------------------------------
@@ -2483,27 +2583,19 @@ def invoice_confirm():
             db.session.add(s); db.session.flush()
         framework=db.session.get(FrameworkAgreement,request.form.get("framework_id",type=int)) if request.form.get("framework_id") else None
         contract=db.session.get(Contract,request.form.get("contract_id",type=int)) if request.form.get("contract_id") else None
-        number=request.form["number"].strip(); total=num(request.form.get("total")); subtotal=num(request.form.get("subtotal")); vat=num(request.form.get("vat")); paid=num(request.form.get("paid"))
+        number=request.form["number"].strip(); total=num(request.form.get("total")); subtotal=num(request.form.get("subtotal")); vat=num(request.form.get("vat"))
+        # IMPORTANTE: pagamento não faz parte da gravação da fatura importada.
+        # O valor pago, método, referência e Ordem de Saque são mantidos no módulo
+        # Pagamentos/Ordens de Saque e apenas apresentados na reconciliação.
         if subtotal and vat and abs(subtotal+vat-total)>0.01: raise ValueError("Subtotal + IVA não corresponde ao Total.")
         if framework and s.id not in {x.id for x in framework.suppliers.all()}: raise ValueError("O fornecedor não está associado ao Acordo-Quadro seleccionado.")
         if contract and contract.supplier_id!=s.id: raise ValueError("O contrato seleccionado não pertence ao fornecedor.")
         if contract and framework and contract.framework_agreement_id!=framework.id: raise ValueError("Contrato e Acordo-Quadro não correspondem.")
         if SupplierInvoice.query.filter(SupplierInvoice.supplier_id==s.id).all() and any(_invoice_number_matches(number,i.number) for i in SupplierInvoice.query.filter_by(supplier_id=s.id).all()): raise ValueError("Já existe uma fatura com este número para o fornecedor.")
         inv=SupplierInvoice(number=number,supplier_id=s.id,contract_id=contract.id if contract else None,framework_agreement_id=framework.id if framework else None,issue_date=parse_date(request.form.get("date")),due_date=parse_date(request.form.get("due_date"),None),subtotal=subtotal,vat=vat,total=total,paid=0,currency=request.form.get("currency") or "AOA",source_filename=data.get("filename"),source_hash=data.get("hash"),raw_text=data.get("text","")[:120000],extracted_data=json.dumps(data,ensure_ascii=False),import_confidence=int(data.get("confidence",0)))
+        inv.status="Pendente"
         db.session.add(inv); db.session.flush()
-        if paid>0:
-            method=request.form.get("payment_method") or data.get("payment_method") or "Outro"
-            if paid>total: raise ValueError("O valor pago não pode exceder o total da fatura.")
-            inv.paid=paid; inv.status="Paga" if paid>=total else "Parcial"
-            receipt=request.form.get("payment_reference") or data.get("reference") or "IMPORT-"+number
-            existing_payment=SupplierPayment.query.filter_by(invoice_id=inv.id).first()
-            if not existing_payment:
-                db.session.add(SupplierPayment(receipt=receipt,supplier_id=s.id,invoice_id=inv.id,contract_id=contract.id if contract else None,framework_agreement_id=framework.id if framework else None,date=inv.issue_date,method=method,amount=paid,reference=receipt,notes="Pagamento criado na importação inteligente após confirmação humana."))
-        os_number=request.form.get("os_number") or data.get("os_number") or ""
-        if os_number:
-            existing_os=PaymentOrder.query.filter_by(os_number=os_number,supplier_id=s.id).first()
-            if not existing_os:
-                db.session.add(PaymentOrder(os_number=os_number,supplier_id=s.id,invoice_id=inv.id,contract_id=contract.id if contract else None,framework_agreement_id=framework.id if framework else None,issue_date=inv.issue_date,amount=paid or total,status="Paga" if paid>=total and total else "Pendente",source_type="Importação inteligente",source_filename=data.get("filename"),source_hash=hashlib.sha256((str(data.get("hash"))+os_number).encode()).hexdigest(),extracted_data=json.dumps(data,ensure_ascii=False),reconciliation_status="Conferido",reconciliation_notes="OS confirmada durante a importação da fatura."))
+
         db.session.commit(); run_compliance_checks(); flash("Fatura importada e reconciliada após revisão humana.")
     except Exception as e:
         db.session.rollback(); flash("Erro ao confirmar a fatura: "+str(e))
