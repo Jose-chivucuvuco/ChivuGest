@@ -1826,18 +1826,71 @@ def reports():
                            status=status, start_date=request.args.get("start_date", ""), end_date=request.args.get("end_date", ""),
                            frameworks=frameworks, contracts_list=contracts, suppliers_list=suppliers)
 
+def _report_export_rows(supplier_id=None, status="Todos", framework_id=None, contract_id=None, start_date=None, end_date=None):
+    rows=_report_invoice_rows(supplier_id,status,framework_id,contract_id,start_date,end_date)
+    data=[]
+    for i in rows:
+        total=money(i.total); paid=money(i.paid); saldo=max(total-paid,0.0)
+        data.append([
+            i.supplier.name if i.supplier else "",
+            i.supplier.nif if i.supplier else "",
+            i.framework_agreement.code if i.framework_agreement else (i.contract.framework_agreement.code if i.contract and i.contract.framework_agreement else ""),
+            i.contract.number if i.contract else "",
+            i.number or "",
+            i.issue_date.isoformat() if i.issue_date else "",
+            i.due_date.isoformat() if i.due_date else "",
+            total, paid, saldo, i.status or ""
+        ])
+    return rows, data
+
 @app.route("/reports/export")
 @login_required
 def report_export():
     supplier_id=request.args.get("supplier_id", type=int); status=request.args.get("status", "Todos")
     framework_id=request.args.get("framework_id", type=int); contract_id=request.args.get("contract_id", type=int)
     start_date=parse_date(request.args.get("start_date"), None); end_date=parse_date(request.args.get("end_date"), None)
-    rows=_report_invoice_rows(supplier_id,status,framework_id,contract_id,start_date,end_date)
-    out=io.StringIO(newline=""); w=csv.writer(out, quoting=csv.QUOTE_MINIMAL)
+    _, data=_report_export_rows(supplier_id,status,framework_id,contract_id,start_date,end_date)
+    # Excel em Angola/Portugal normalmente interpreta ';' como separador CSV.
+    # Mantemos UTF-8 com BOM, aspas e ponto decimal para evitar que todo o registo
+    # seja colocado numa única célula quando aberto diretamente no Excel.
+    out=io.StringIO(newline="")
+    w=csv.writer(out, delimiter=";", quotechar='"', quoting=csv.QUOTE_MINIMAL, lineterminator="\r\n")
     w.writerow(["Fornecedor","NIF","Acordo-Quadro","Contrato","Fatura","Data","Vencimento","Total","Pago","Saldo","Estado"])
-    for i in rows:
-        w.writerow([i.supplier.name,i.supplier.nif or "",i.framework_agreement.code if i.framework_agreement else (i.contract.framework_agreement.code if i.contract and i.contract.framework_agreement else ""),i.contract.number if i.contract else "",i.number,i.issue_date.isoformat() if i.issue_date else "",i.due_date.isoformat() if i.due_date else "",f"{money(i.total):.2f}",f"{money(i.paid):.2f}",f"{max(money(i.total)-money(i.paid),0):.2f}",i.status])
-    return Response("\ufeff"+out.getvalue(),mimetype="text/csv",headers={"Content-Disposition":"attachment; filename=chivugest_relatorio_fornecedores.csv"})
+    for r in data:
+        w.writerow([*r[:7], f"{r[7]:.2f}", f"{r[8]:.2f}", f"{r[9]:.2f}", r[10]])
+    return Response("\ufeff"+out.getvalue(),mimetype="text/csv; charset=utf-8",headers={"Content-Disposition":"attachment; filename=chivugest_relatorio_fornecedores.csv"})
+
+@app.route("/reports/export.xlsx")
+@login_required
+def report_export_xlsx():
+    supplier_id=request.args.get("supplier_id", type=int); status=request.args.get("status", "Todos")
+    framework_id=request.args.get("framework_id", type=int); contract_id=request.args.get("contract_id", type=int)
+    start_date=parse_date(request.args.get("start_date"), None); end_date=parse_date(request.args.get("end_date"), None)
+    _, data=_report_export_rows(supplier_id,status,framework_id,contract_id,start_date,end_date)
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    wb=Workbook(); ws=wb.active; ws.title="Relatório"
+    headers=["Fornecedor","NIF","Acordo-Quadro","Contrato","Fatura","Data","Vencimento","Total","Pago","Saldo","Estado"]
+    ws.append(headers)
+    for r in data:
+        ws.append(r[:7]+[r[7],r[8],r[9],r[10]])
+    header_fill=PatternFill("solid", fgColor="17365D")
+    header_font=Font(color="FFFFFF", bold=True)
+    thin=Side(style="thin", color="D9E2F3")
+    for cell in ws[1]:
+        cell.fill=header_fill; cell.font=header_font; cell.alignment=Alignment(horizontal="center", vertical="center")
+        cell.border=Border(bottom=thin)
+    for row in ws.iter_rows(min_row=2, min_col=8, max_col=10):
+        for cell in row:
+            cell.number_format='#,##0.00'
+    for col in range(1,12):
+        max_len=max([len(str(ws.cell(row=r,column=col).value or "")) for r in range(1,ws.max_row+1)] or [10])
+        ws.column_dimensions[get_column_letter(col)].width=min(max(max_len+2,12),45)
+    ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions
+    ws.sheet_view.showGridLines=False
+    buf=io.BytesIO(); wb.save(buf); buf.seek(0)
+    return send_file(buf,mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",as_attachment=True,download_name="ChivuGest_Relatorio_Fornecedores.xlsx")
 
 @app.route("/reports/supplier/<int:supplier_id>/pdf")
 @login_required
