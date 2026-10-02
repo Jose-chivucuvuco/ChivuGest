@@ -1894,12 +1894,14 @@ def _supplier_pdf_bytes(supplier, invoices, generated_at=None):
     summary = [["Total faturado", "Total pago", "Saldo a pagar", "N.º faturas"],
                [_pdf_money(metrics["invoiced"]), _pdf_money(metrics["paid"]), _pdf_money(metrics["payable"]), str(metrics["count"])]]
     st = Table(summary, colWidths=[44*mm]*4); st.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#f1f5f9")),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#dbe3ef")),("ALIGN",(0,0),(-1,-1),"CENTER"),("FONTSIZE",(0,0),(-1,-1),9),("PADDING",(0,0),(-1,-1),6)])); story += [st, Spacer(1, 7*mm), Paragraph("FATURAS", styles["Heading3"])]
-    data = [["Fatura","Ordem de Saque (N.º)","Data","Total","Pago","Saldo","Estado"]]
+    # Ordem das colunas no PDF: a Ordem de Saque fica imediatamente depois do Total.
+    data = [["Fatura","Data","Total","Ordem de Saque (N.º)","Pago","Saldo","Estado"]]
     for i in invoices:
         state = "Vencida" if money(i.total) > money(i.paid) and i.due_date and i.due_date < date.today() else (i.status or "Pendente")
-        data.append([i.number, _invoice_payment_order_numbers(i) or "—", i.issue_date.strftime("%d/%m/%Y") if i.issue_date else "—", _pdf_money(i.total), _pdf_money(i.paid), _pdf_money(max(money(i.total)-money(i.paid),0)), state])
-    if len(data)==1: data.append(["Sem faturas para os filtros selecionados","","","","","","",""])
-    ft = Table(data, repeatRows=1, colWidths=[30*mm,35*mm,25*mm,27*mm,27*mm,27*mm,25*mm])
+        data.append([i.number, i.issue_date.strftime("%d/%m/%Y") if i.issue_date else "—", _pdf_money(i.total), _invoice_payment_order_numbers(i) or "—", _pdf_money(i.paid), _pdf_money(max(money(i.total)-money(i.paid),0)), state])
+    if len(data)==1: data.append(["Sem faturas para os filtros selecionados","","","","","",""])
+    # Larguras somam 178 mm, respeitando a área útil A4 (210 - 32 mm de margens).
+    ft = Table(data, repeatRows=1, colWidths=[27*mm,23*mm,28*mm,34*mm,24*mm,24*mm,18*mm])
     ft.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365d")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#dbe3ef")),("FONTSIZE",(0,0),(-1,-1),7.5),("PADDING",(0,0),(-1,-1),5),("VALIGN",(0,0),(-1,-1),"MIDDLE")]))
     story += [ft, Spacer(1, 7*mm), Paragraph(f"Relatório gerado automaticamente pelo ChivuGest em {generated_at.strftime('%d/%m/%Y %H:%M')}.", styles["SmallBlue"])]
     def footer(canvas, doc):
