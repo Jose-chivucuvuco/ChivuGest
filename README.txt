@@ -36,7 +36,7 @@ OCR NO RENDER
 O Dockerfile instala tesseract-ocr, tesseract-ocr-por e tesseract-ocr-eng.
 
 
-CORREÇÃO OOM/OCR: processamento OCR limitado a imagens de 2600 px, PDF até 20 páginas, 1.5 DPI, escala de cinza e recolha de memória; upload máximo 20 MB.
+CORREÇÃO OOM/OCR: OCR de baixo consumo para Render Free: texto nativo do PDF é priorizado; OCR limitado a 6 páginas por documento, PDF limitado a 20 páginas, renderização em escala de cinza, dimensão máxima de 1800 px, uma única passagem Tesseract por página, timeout de 18 s por página, OMP_THREAD_LIMIT=1 e recolha de memória; upload máximo 25 MB.
 
 
 ACTUALIZAÇÃO CONSOLIDADA — 29/09/2026

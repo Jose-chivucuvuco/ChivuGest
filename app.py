@@ -1,4 +1,4 @@
-import os, csv, io, re, json, hashlib, secrets, unicodedata, urllib.request, urllib.error, xml.etree.ElementTree as ET
+import os, csv, io, re, json, hashlib, secrets, unicodedata, urllib.request, urllib.error, xml.etree.ElementTree as ET, gc
 from datetime import datetime, date, timedelta
 from functools import wraps
 from decimal import Decimal, InvalidOperation
@@ -13,6 +13,7 @@ try:
     import fitz
 except ImportError:
     fitz = None
+os.environ.setdefault("OMP_THREAD_LIMIT", "1")
 try:
     import pytesseract
 except ImportError:
@@ -21,7 +22,7 @@ try:
     from openpyxl import load_workbook
 except ImportError:
     load_workbook = None
-from PIL import Image, ImageOps, ImageFilter
+from PIL import Image, ImageOps
 try:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
@@ -620,67 +621,162 @@ def extract_invoice_document(file_storage):
 
 
 def extract_pdf_or_image(file_storage):
+    """Extract invoice text while keeping OCR memory/CPU bounded for small cloud instances.
+
+    Strategy:
+    1) Read native PDF text first.
+    2) Run OCR only on pages whose native text is insufficient.
+    3) OCR one page at a time at a bounded resolution.
+    4) Use a single Tesseract pass (por+eng, PSM 6) with a hard timeout.
+    5) Never keep rendered page images in memory after each page.
+    """
     filename = (file_storage.filename or "").lower()
     raw = file_storage.read()
     digest = hashlib.sha256(raw).hexdigest()
     texts = []
+    total_pages = 0
+
+    MAX_PDF_PAGES = int(os.environ.get("CHIVUGEST_OCR_MAX_PDF_PAGES", "20"))
+    MAX_OCR_PAGES = int(os.environ.get("CHIVUGEST_OCR_MAX_PAGES", "6"))
+    OCR_DPI_SCALE = float(os.environ.get("CHIVUGEST_OCR_SCALE", "2.0"))
+    OCR_MAX_DIM = int(os.environ.get("CHIVUGEST_OCR_MAX_DIM", "1800"))
+    OCR_TIMEOUT = int(os.environ.get("CHIVUGEST_OCR_TIMEOUT", "18"))
 
     def ocr_image(img):
-        if pytesseract is None: raise ValueError("OCR não instalado no servidor. Instale tesseract-ocr e tesseract-ocr-por.")
-        gray=img.convert("L")
-        scale=2 if max(gray.width, gray.height) < 2200 else 1
-        gray=gray.resize((gray.width*scale, gray.height*scale), Image.Resampling.LANCZOS)
-        gray=ImageOps.autocontrast(gray)
-        gray=gray.filter(ImageFilter.SHARPEN)
-        variants=[gray]
-        # A thresholded copy helps with faded/low-contrast scans.
-        try: variants.append(gray.point(lambda p: 255 if p > 180 else 0))
-        except Exception: pass
-        passes=[]
-        for variant in variants:
-            for psm in (6, 11, 4):
+        if pytesseract is None:
+            raise ValueError("OCR não instalado no servidor. Instale tesseract-ocr e tesseract-ocr-por.")
+
+        # Work on one compact grayscale image. Avoid multiple variants/PSM passes:
+        # they multiply both memory usage and Tesseract CPU time on Render Free.
+        gray = img.convert("L")
+        try:
+            max_dim = max(gray.size)
+            if max_dim > OCR_MAX_DIM:
+                ratio = OCR_MAX_DIM / float(max_dim)
+                gray = gray.resize(
+                    (max(1, int(gray.width * ratio)), max(1, int(gray.height * ratio))),
+                    Image.Resampling.LANCZOS,
+                )
+            elif max_dim < 1000:
+                # Very small scans benefit from a modest enlargement, but never
+                # create the 2x/3x images used by the previous implementation.
+                ratio = min(1.35, 1000 / float(max_dim))
+                gray = gray.resize(
+                    (max(1, int(gray.width * ratio)), max(1, int(gray.height * ratio))),
+                    Image.Resampling.LANCZOS,
+                )
+            gray = ImageOps.autocontrast(gray)
+            config = "--psm 6"
+            try:
+                return pytesseract.image_to_string(
+                    gray,
+                    lang="por+eng",
+                    config=config,
+                    timeout=OCR_TIMEOUT,
+                ) or ""
+            except RuntimeError as exc:
+                # pytesseract raises RuntimeError when its subprocess exceeds
+                # timeout. Keep the web request alive and let the human review.
+                return f"[OCR_TIMEOUT: {exc}]"
+            except Exception:
+                # Some Tesseract installations may not have por+eng available.
                 try:
-                    txt=pytesseract.image_to_string(variant, lang="por+eng", config=f"--psm {psm}")
+                    return pytesseract.image_to_string(
+                        gray,
+                        lang="eng",
+                        config=config,
+                        timeout=OCR_TIMEOUT,
+                    ) or ""
                 except Exception:
-                    try: txt=pytesseract.image_to_string(variant, lang="eng", config=f"--psm {psm}")
-                    except Exception: txt=""
-                if txt and txt.strip(): passes.append(txt)
-        return "\n".join(passes)
+                    return ""
+        finally:
+            try:
+                gray.close()
+            except Exception:
+                pass
+            gc.collect()
+
+    def page_needs_ocr(native):
+        if not native or len(re.sub(r"\s+", "", native)) < 80:
+            return True
+        parsed_native = parse_invoice_text(native)
+        # If the native PDF already has the core invoice fields, don't invoke OCR.
+        return not parsed_native.get("number") or not parsed_native.get("total")
 
     if filename.endswith(".pdf"):
-        if fitz is None: raise ValueError("PyMuPDF não instalado.")
+        if fitz is None:
+            raise ValueError("PyMuPDF não instalado.")
         doc = fitz.open(stream=raw, filetype="pdf")
-        for page in doc:
-            native = page.get_text("text") or ""
-            parsed_native=parse_invoice_text(native) if native else {}
-            # OCR whenever native text is absent OR clearly lacks key invoice fields.
-            weak=(len(re.sub(r"\s+", "", native)) < 80 or
-                  not parsed_native.get("number") or not parsed_native.get("total"))
-            if weak and pytesseract is not None:
-                pix = page.get_pixmap(matrix=fitz.Matrix(2.2, 2.2), alpha=False)
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                try: ocr=ocr_image(img)
-                finally: img.close(); del pix
+        try:
+            total_pages = len(doc)
+            ocr_count = 0
+            pages_to_process = min(total_pages, MAX_PDF_PAGES)
+            for page_index in range(pages_to_process):
+                page = doc[page_index]
+                native = page.get_text("text") or ""
                 texts.append(native)
-                texts.append(ocr)
-            else:
-                texts.append(native)
-        doc.close()
+
+                if page_needs_ocr(native):
+                    if pytesseract is None:
+                        continue
+                    if ocr_count >= MAX_OCR_PAGES:
+                        texts.append(f"[OCR_LIMIT: limite de {MAX_OCR_PAGES} páginas atingido]")
+                        continue
+                    ocr_count += 1
+                    pix = None
+                    img = None
+                    try:
+                        # Render directly in grayscale to reduce memory versus RGB.
+                        pix = page.get_pixmap(
+                            matrix=fitz.Matrix(OCR_DPI_SCALE, OCR_DPI_SCALE),
+                            colorspace=fitz.csGRAY,
+                            alpha=False,
+                        )
+                        img = Image.frombytes("L", [pix.width, pix.height], pix.samples)
+                        ocr = ocr_image(img)
+                        if ocr.strip():
+                            texts.append(ocr)
+                    finally:
+                        try:
+                            if img is not None:
+                                img.close()
+                        except Exception:
+                            pass
+                        pix = None
+                        img = None
+                        gc.collect()
+        finally:
+            doc.close()
+            gc.collect()
     elif filename.endswith((".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff")):
-        if pytesseract is None: raise ValueError("OCR não instalado.")
+        if pytesseract is None:
+            raise ValueError("OCR não instalado.")
         img = Image.open(io.BytesIO(raw))
-        try: texts.append(ocr_image(img))
-        finally: img.close()
+        try:
+            ocr = ocr_image(img)
+            if ocr.strip():
+                texts.append(ocr)
+        finally:
+            img.close()
+            gc.collect()
     else:
         raise ValueError("Formato não suportado para OCR. Use PDF, PNG, JPG, JPEG, WEBP, TIF ou TIFF.")
-    combined="\n".join(x for x in texts if x)
+
+    combined = "\n".join(x for x in texts if x and not x.startswith("[OCR_TIMEOUT:") and not x.startswith("[OCR_LIMIT:"))
     if not combined.strip():
         raise ValueError("Não foi possível extrair texto do documento. Verifique se o PDF/imagem está legível ou digitalizado e tente novamente.")
+
     parsed = parse_invoice_text(combined)
     parsed["hash"] = digest
     parsed["filename"] = file_storage.filename
     parsed["ocr_text_length"] = len(combined.strip())
-    if parsed.get("confidence", 0) == 0:
+    if filename.endswith(".pdf") and total_pages > MAX_PDF_PAGES:
+        parsed["ocr_warning"] = f"O PDF tem {total_pages} páginas; por segurança, foram processadas apenas as primeiras {MAX_PDF_PAGES}."
+    elif any(x.startswith("[OCR_TIMEOUT:") for x in texts):
+        parsed["ocr_warning"] = "O OCR excedeu o tempo máximo de uma página. Os campos reconhecidos foram mantidos para revisão manual."
+    elif any(x.startswith("[OCR_LIMIT:") for x in texts):
+        parsed["ocr_warning"] = f"O documento tem mais páginas do que o limite de OCR ({MAX_OCR_PAGES}). As páginas adicionais não foram processadas."
+    elif parsed.get("confidence", 0) == 0:
         parsed["ocr_warning"] = "O documento foi lido, mas nenhum campo essencial de fatura foi reconhecido. Revise o documento ou melhore a qualidade da digitalização."
     return parsed
 
