@@ -875,6 +875,39 @@ def extract_pdf_or_image(file_storage):
     return parsed
 
 
+def _is_company_docfonte_row(row):
+    """Return True only for organisational/company records in SIGFE DocFonte.
+
+    Payroll and travel allowances are intentionally excluded from the ChivuGest
+    supplier/enterprise import. The SIGFE report identifies these records through
+    Categoria, Tipo do Contribuinte, Tipo OS and Natureza.
+    """
+    taxpayer_type = _normalize_match_text(row_value(row, "tipo_do_contribuinte", "tipo_contribuinte", "tipo_de_contribuinte"))
+    category = _normalize_match_text(row_value(row, "categoria"))
+    os_type = _normalize_match_text(row_value(row, "tipo_os", "tipo_da_os"))
+    nature = _normalize_match_text(row_value(row, "natureza"))
+
+    # Individuals are personnel records for this import purpose. Keep
+    # collective/institutional/foreign organisational beneficiaries.
+    if taxpayer_type and taxpayer_type in {"singular", "pessoa singular"}:
+        return False
+
+    payroll_terms = (
+        "salarios", "salario", "vencimentos", "remuneracoes",
+        "subsidios do pessoal", "decimo terceiro mes",
+        "abono de familia", "contribuicoes do empregador",
+        "seguranca social", "irt", "pessoal civil"
+    )
+    travel_terms = ("subsidios de deslocacao", "subsidio de deslocacao", "ajuda de custo", "diarias")
+    if category == "pessoal":
+        return False
+    if any(term in os_type for term in payroll_terms + travel_terms):
+        return False
+    if any(term in nature for term in payroll_terms + travel_terms):
+        return False
+    return True
+
+
 def uploaded_rows(f):
     """Read CSV/XLSX imports with strict resource limits.
 
@@ -894,7 +927,7 @@ def uploaded_rows(f):
             rows_iter = ws.iter_rows(min_row=1, max_row=max_rows + 30, max_col=max_cols, values_only=True)
             preview = []
             header_idx = None
-            known = {"fornecedor", "beneficiario", "nif", "ordem_de_saque", "ordem_saque", "numero_os", "n_os", "no_os", "fatura", "numero", "data", "data_emissao_os", "data_confirmacao_pagamento", "total", "valor", "valor_total_mn", "valor_os_mn", "situacao", "situacao_os", "estado", "finalidade_os", "finalidade_da_os"}
+            known = {"fornecedor", "beneficiario", "nif", "ordem_de_saque", "ordem_saque", "numero_os", "n_os", "no_os", "fatura", "numero", "data", "data_emissao_os", "data_confirmacao_pagamento", "total", "valor", "valor_total_mn", "valor_os_mn", "situacao", "situacao_os", "estado", "finalidade_os", "finalidade_da_os", "tipo_do_contribuinte", "categoria", "natureza", "tipo_os"}
             for idx, row in enumerate(rows_iter, start=1):
                 vals = list(row)
                 norm = [normalize_key(v) for v in vals]
@@ -2048,7 +2081,14 @@ def import_payment_documents():
                 source_rows=[]
                 payment_rows=[]
 
+            excluded_non_company = 0
             for r in rows:
+                # This ChivuGest import is for enterprise/supplier data only.
+                # Payroll, salaries and travel allowances must never become
+                # suppliers, invoices or payment orders.
+                if not _is_company_docfonte_row(r):
+                    excluded_non_company += 1
+                    continue
                 beneficiary = str(row_value(r,"fornecedor","supplier","emitente","beneficiario") or "").strip()
                 nif = str(row_value(r,"nif","nuit","tax_id") or "").strip()
                 if beneficiary and " - " in beneficiary:
@@ -2180,7 +2220,7 @@ def import_payment_documents():
             doc=SourceDocument(document_type=source_type,document_number=parsed.get("os_number") or parsed.get("invoice_number") or None,supplier_id=supplier.id,source_filename=parsed["filename"],source_hash=parsed["hash"],issue_date=parsed.get("date_parsed"),amount=parsed.get("amount",0),extracted_data=json.dumps(parsed,ensure_ascii=False),import_confidence=parsed.get("confidence",0))
             osr=PaymentOrder(os_number=parsed.get("os_number") or parsed.get("invoice_number") or "SEM-NUMERO",supplier_id=supplier.id,invoice_id=invoice.id if invoice else None,contract_id=contract.id if contract else None,framework_agreement_id=(contract.framework_agreement_id if contract else (invoice.framework_agreement_id if invoice else None)),issue_date=parsed.get("date_parsed"),amount=parsed.get("amount",0),status=normalize_os_status(parsed.get("status")),bank_reference=parsed.get("bank_reference"),source_type=source_type,source_filename=parsed["filename"],source_hash=parsed["hash"],extracted_data=json.dumps(parsed,ensure_ascii=False),reconciliation_status=recon_status,reconciliation_notes=recon_notes)
             db.session.add_all([doc,osr]); created=1; db.session.commit()
-        flash(f"Importação concluída: {created} documento(s)/ordem(ns) de saque. As informações foram cruzadas por fornecedor, NIF, fatura, valor e situação.")
+        flash(f"Importação concluída: {created} documento(s)/ordem(ns) de saque de empresas. {excluded_non_company} registo(s) de salários, pessoal e subsídios de deslocação foram excluídos automaticamente.")
     except Exception as e:
         db.session.rollback(); flash("Erro na importação do documento: "+str(e))
     return redirect(url_for("supplier_payments"))
