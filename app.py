@@ -2109,9 +2109,23 @@ def import_payment_documents():
                         supplier=resolve_or_queue_supplier(parsed.get("supplier"), parsed.get("nif"))
                     match_cache[cache_key]=(supplier,invoice,contract,recon_status,recon_notes)
 
-                # Se o fornecedor acabou de ser criado, o flush_batch() atribuirá
-                # o ID antes do INSERT em lote.
-                supplier_id=supplier.id
+                # Um fornecedor novo ainda não tem ID até o SQLAlchemy fazer flush.
+                # O INSERT em lote de PaymentOrder/SourceDocument exige supplier_id
+                # preenchido; por isso, quando o fornecedor foi acabado de criar,
+                # atribuímos os IDs de todos os fornecedores pendentes antes de
+                # construir as linhas do lote. Isto evita o NotNullViolation:
+                # payment_order.supplier_id = NULL.
+                if supplier is not None and supplier.id is None:
+                    db.session.flush()
+                    for pkey, pobj in pending_suppliers:
+                        if pobj.nif:
+                            supplier_by_nif.setdefault(str(pobj.nif).strip(), pobj)
+                        pkey_name = _normalize_match_text(pobj.name)
+                        if pkey_name:
+                            supplier_by_name.setdefault(pkey_name, pobj)
+                supplier_id=supplier.id if supplier is not None else None
+                if not supplier_id:
+                    raise ValueError(f"Não foi possível identificar/criar o fornecedor para a OS {parsed.get('os_number') or 'sem número'}.")
                 framework_id=(contract.framework_agreement_id if contract else (invoice.framework_agreement_id if invoice else None))
                 extracted=json.dumps(parsed,ensure_ascii=False)
                 source_rows.append({
