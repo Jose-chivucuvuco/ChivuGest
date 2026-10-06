@@ -1982,15 +1982,75 @@ def import_payment_documents():
                     invoice_by_supplier_number.setdefault((inv.supplier_id, key), []).append(inv)
                     invoice_by_number.setdefault(key, []).append(inv)
 
-            batch_size=max(50, int(os.environ.get("CHIVUGEST_IMPORT_BATCH_SIZE", "200")))
-            pending=0
+            # Importação otimizada para Render: evitar uma query por OS e evitar
+            # criar milhares de objetos ORM na identity map. O DocFonte pode ter
+            # milhares de linhas; usamos índices em memória e inserções em lote.
+            batch_size=max(250, int(os.environ.get("CHIVUGEST_IMPORT_BATCH_SIZE", "500")))
+
+            # Duplicados do mesmo ficheiro são detectados em memória. Como
+            # source_hash é único, consultar apenas hashes do mesmo nome de ficheiro
+            # é muito mais barato que fazer .first() para cada uma das 2.918 linhas.
+            existing_hashes={
+                x[0] for x in db.session.query(SourceDocument.source_hash)
+                .filter(SourceDocument.source_filename == f.filename).all()
+                if x[0]
+            }
+
+            source_rows=[]
+            payment_rows=[]
+            seen_hashes=set(existing_hashes)
+            pending_suppliers=[]
+            pending_supplier_keys=set()
+
+            def resolve_or_queue_supplier(name, nif):
+                key_nif=str(nif or "").strip()
+                key_name=_normalize_match_text(name)
+                supplier=None
+                if key_nif:
+                    supplier=supplier_by_nif.get(key_nif)
+                if supplier is None and key_name:
+                    supplier=supplier_by_name.get(key_name)
+                if supplier is not None:
+                    return supplier
+
+                queue_key=(key_nif, key_name)
+                if queue_key not in pending_supplier_keys:
+                    supplier=Supplier(
+                        name=(name or "Fornecedor a identificar").strip(),
+                        nif=key_nif or None,
+                        contracting_type="Outro / Regime especial"
+                    )
+                    db.session.add(supplier)
+                    pending_suppliers.append((queue_key, supplier))
+                    pending_supplier_keys.add(queue_key)
+                else:
+                    supplier=next((obj for k,obj in pending_suppliers if k==queue_key), None)
+                return supplier
+
+            def flush_batch():
+                nonlocal source_rows, payment_rows, created, pending_suppliers
+                if pending_suppliers:
+                    # Um único flush atribui os IDs dos novos fornecedores.
+                    db.session.flush()
+                    for key, obj in pending_suppliers:
+                        if obj.nif:
+                            supplier_by_nif.setdefault(str(obj.nif).strip(), obj)
+                        nkey=_normalize_match_text(obj.name)
+                        if nkey:
+                            supplier_by_name.setdefault(nkey, obj)
+                    pending_suppliers=[]
+                if source_rows:
+                    db.session.bulk_insert_mappings(SourceDocument, source_rows)
+                if payment_rows:
+                    db.session.bulk_insert_mappings(PaymentOrder, payment_rows)
+                if source_rows or payment_rows:
+                    db.session.commit()
+                source_rows=[]
+                payment_rows=[]
+
             for r in rows:
                 beneficiary = str(row_value(r,"fornecedor","supplier","emitente","beneficiario") or "").strip()
                 nif = str(row_value(r,"nif","nuit","tax_id") or "").strip()
-                # SIGFE DocFonte exports the taxpayer ID and supplier name in a
-                # single Beneficiário field, e.g. "5417096563 - Empresa, Lda".
-                # Split it only when the delimiter is present so foreign IDs
-                # such as DE315879502 are preserved as well.
                 if beneficiary and " - " in beneficiary:
                     possible_nif, possible_name = beneficiary.split(" - ", 1)
                     if not nif and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{3,30}", possible_nif.strip()):
@@ -2013,7 +2073,7 @@ def import_payment_documents():
 
                 amount_value = row_value(r,"valor_total_mn","valor_os_mn","valor","valor_os","montante","amount","total")
                 parsed={
-                    "os_number": str(row_value(r,"ordem_saque","ordem_de_saque","os","numero_os","n_os","ordem","numero_ordem") or "").strip(),
+                    "os_number": str(row_value(r,"ordem_saque","ordem_de_saque","os","numero_os","n_os","no_os","ordem","numero_ordem") or "").strip(),
                     "supplier": beneficiary_name,
                     "nif": nif,
                     "invoice_number": invoice_number,
@@ -2025,12 +2085,17 @@ def import_payment_documents():
                     "contract_number": str(row_value(r,"numero_contrato","contrato","contract") or "").strip(),
                     "source_value_mn": num(row_value(r,"valor_total_mn")),
                 }
-                parsed["date_parsed"]=parse_date(parsed.get("date"),None); parsed["filename"]=f.filename
+                parsed["date_parsed"]=parse_date(parsed.get("date"),None)
+                parsed["filename"]=f.filename
                 parsed["confidence"]=min(100, sum(bool(parsed.get(k)) for k in ("os_number","supplier","invoice_number","date","amount"))*20 + (10 if parsed.get("nif") else 0))
-                if not parsed["os_number"]: continue
-                # Stable row hash avoids duplicate imports while preserving one hash per OS row.
+                if not parsed["os_number"]:
+                    continue
+
                 parsed["hash"]=hashlib.sha256((upload_hash+json.dumps(parsed,sort_keys=True,default=str)).encode()).hexdigest()
-                if PaymentOrder.query.filter_by(source_hash=parsed["hash"]).first(): continue
+                if parsed["hash"] in seen_hashes:
+                    continue
+                seen_hashes.add(parsed["hash"])
+
                 cache_key=(parsed.get("nif") or "", _normalize_match_text(parsed.get("supplier") or ""), parsed.get("invoice_number") or "", money(parsed.get("amount")))
                 if cache_key in match_cache:
                     supplier,invoice,contract,recon_status,recon_notes=match_cache[cache_key]
@@ -2040,26 +2105,53 @@ def import_payment_documents():
                         supplier_by_nif=supplier_by_nif, supplier_by_name=supplier_by_name,
                         invoice_by_supplier_number=invoice_by_supplier_number, invoice_by_number=invoice_by_number
                     )
-                    match_cache[cache_key]=(supplier,invoice,contract,recon_status,recon_notes)
-                if not supplier:
-                    sname=(parsed.get("supplier") or "Fornecedor a identificar").strip()
-                    supplier=Supplier.query.filter_by(name=sname).first()
                     if not supplier:
-                        supplier=Supplier(name=sname,nif=parsed.get("nif") or None,contracting_type="Outro / Regime especial")
-                        db.session.add(supplier); db.session.flush()
-                        supplier_pool.append(supplier)
-                doc=SourceDocument(document_type=source_type,document_number=parsed["os_number"],supplier_id=supplier.id,source_filename=f.filename,source_hash=parsed["hash"],issue_date=parsed["date_parsed"],amount=parsed["amount"],extracted_data=json.dumps(parsed,ensure_ascii=False),import_confidence=parsed["confidence"])
-                osr=PaymentOrder(os_number=parsed["os_number"],supplier_id=supplier.id,invoice_id=invoice.id if invoice else None,contract_id=contract.id if contract else None,framework_agreement_id=(contract.framework_agreement_id if contract else (invoice.framework_agreement_id if invoice else None)),issue_date=parsed["date_parsed"],amount=parsed["amount"],status=normalize_os_status(parsed["status"]),bank_reference=parsed["bank_reference"],source_type=source_type,source_filename=f.filename,source_hash=parsed["hash"],extracted_data=json.dumps(parsed,ensure_ascii=False),reconciliation_status=recon_status,reconciliation_notes=recon_notes)
-                db.session.add_all([doc,osr]); created+=1
-                pending += 1
-                if pending >= batch_size:
-                    db.session.commit()
-                    # Keep the SQLAlchemy identity map small during large XLSX
-                    # imports so the Render worker does not grow until timeout.
-                    db.session.expire_all()
-                    pending = 0
-            if pending:
-                db.session.commit()
+                        supplier=resolve_or_queue_supplier(parsed.get("supplier"), parsed.get("nif"))
+                    match_cache[cache_key]=(supplier,invoice,contract,recon_status,recon_notes)
+
+                # Se o fornecedor acabou de ser criado, o flush_batch() atribuirá
+                # o ID antes do INSERT em lote.
+                supplier_id=supplier.id
+                framework_id=(contract.framework_agreement_id if contract else (invoice.framework_agreement_id if invoice else None))
+                extracted=json.dumps(parsed,ensure_ascii=False)
+                source_rows.append({
+                    "document_type":source_type,
+                    "document_number":parsed["os_number"],
+                    "supplier_id":supplier_id,
+                    "invoice_id":invoice.id if invoice else None,
+                    "contract_id":contract.id if contract else None,
+                    "framework_agreement_id":framework_id,
+                    "source_filename":f.filename,
+                    "source_hash":parsed["hash"],
+                    "issue_date":parsed["date_parsed"],
+                    "amount":parsed["amount"],
+                    "extracted_data":extracted,
+                    "import_confidence":parsed["confidence"]
+                })
+                payment_rows.append({
+                    "os_number":parsed["os_number"],
+                    "supplier_id":supplier_id,
+                    "invoice_id":invoice.id if invoice else None,
+                    "contract_id":contract.id if contract else None,
+                    "framework_agreement_id":framework_id,
+                    "issue_date":parsed["date_parsed"],
+                    "amount":parsed["amount"],
+                    "status":normalize_os_status(parsed["status"]),
+                    "bank_reference":parsed["bank_reference"],
+                    "source_type":source_type,
+                    "source_filename":f.filename,
+                    "source_hash":parsed["hash"],
+                    "extracted_data":extracted,
+                    "reconciliation_status":recon_status,
+                    "reconciliation_notes":recon_notes
+                })
+                created += 1
+
+                if len(source_rows) >= batch_size:
+                    flush_batch()
+
+            flush_batch()
+
         else:
             parsed=extract_generic_source_document(f)
             if SourceDocument.query.filter_by(source_hash=parsed["hash"]).first() or PaymentOrder.query.filter_by(source_hash=parsed["hash"]).first():
