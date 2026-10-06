@@ -1167,84 +1167,56 @@ def _reconcile_payment_orders(existing_only=False):
         db.session.commit()
     return changed
 
-def match_payment_order(data, supplier_pool=None, invoice_pool=None, supplier_by_nif=None, supplier_by_name=None, invoice_by_supplier_number=None, invoice_by_number=None):
-    """Match an imported DocFonte/OS using pre-built indexes for batch imports.
+def match_payment_order(data, supplier_pool=None, invoice_pool=None):
+    """Match an imported DocFonte/OS row without issuing N+1 database queries.
 
-    The Render worker is single-process and memory constrained.  Never scan the
-    full supplier/invoice lists for every imported row; batch imports build
-    dictionaries once and each row then performs O(1) lookups.
+    For batch XLSX imports, callers can provide preloaded supplier/invoice lists.
+    This is critical on Render Free: the previous implementation loaded all
+    suppliers and all invoices again for every spreadsheet row.
     """
-    supplier = None
-    nif = str(data.get("nif") or "").strip()
-    normalized_name = _normalize_match_text(data.get("supplier") or "")
-
-    if supplier_by_nif is not None and nif:
-        supplier = supplier_by_nif.get(nif)
-    elif nif and supplier_pool is not None:
-        supplier = next((x for x in supplier_pool if str(x.nif or "").strip() == nif), None)
-    elif nif:
-        supplier = Supplier.query.filter_by(nif=nif).first()
-
-    if not supplier and normalized_name:
-        if supplier_by_name is not None:
-            supplier = supplier_by_name.get(normalized_name)
-        elif supplier_pool is not None:
-            supplier = next((x for x in supplier_pool if _normalize_match_text(x.name) == normalized_name), None)
+    supplier=None
+    nif=(data.get("nif") or "").strip()
+    suppliers = supplier_pool if supplier_pool is not None else None
+    if nif:
+        if suppliers is not None:
+            supplier=next((s for s in suppliers if str(s.nif or "").strip()==nif), None)
         else:
-            for x in Supplier.query.yield_per(250):
-                if _normalize_match_text(x.name) == normalized_name:
-                    supplier = x
-                    break
-
-    invoice = None
-    invoice_number = str(data.get("invoice_number") or "").strip()
-    keys = _invoice_number_keys(invoice_number) if invoice_number else set()
-
-    if supplier and invoice_by_supplier_number is not None and keys:
-        candidates = []
-        for key in keys:
-            candidates.extend(invoice_by_supplier_number.get((supplier.id, key), ()))
-        # de-duplicate while preserving order
-        seen = set(); candidates = [i for i in candidates if not (i.id in seen or seen.add(i.id))]
-    elif not supplier and invoice_by_number is not None and keys:
-        candidates = []
-        for key in keys:
-            candidates.extend(invoice_by_number.get(key, ()))
-        seen = set(); candidates = [i for i in candidates if not (i.id in seen or seen.add(i.id))]
-    elif invoice_pool is not None:
-        candidates = [i for i in invoice_pool if not supplier or i.supplier_id == supplier.id]
+            supplier=Supplier.query.filter_by(nif=nif).first()
+    if not supplier and data.get("supplier"):
+        normalized=_normalize_match_text(data.get("supplier"))
+        if suppliers is not None:
+            supplier=next((s for s in suppliers if _normalize_match_text(s.name)==normalized), None)
+        else:
+            # Keep the fallback bounded and database-backed rather than loading
+            # the entire supplier table for every imported row.
+            for s in Supplier.query.yield_per(250):
+                if _normalize_match_text(s.name)==normalized:
+                    supplier=s; break
+    invoice=None
+    invoice_number=data.get("invoice_number") or ""
+    if invoice_pool is not None:
+        candidates=[i for i in invoice_pool if not supplier or i.supplier_id==supplier.id]
     else:
-        candidates = SupplierInvoice.query.filter_by(supplier_id=supplier.id).all() if supplier else SupplierInvoice.query.all()
-
-    if keys:
-        # Indexed candidates are already number matches; for fallback pools,
-        # apply the canonical matcher explicitly.
-        by_number = candidates if (invoice_by_supplier_number is not None or invoice_by_number is not None) else [i for i in candidates if _invoice_number_matches(invoice_number, i.number)]
-    else:
-        by_number = []
-
-    if len(by_number) == 1:
-        invoice = by_number[0]
-    elif len(by_number) > 1:
-        amount = money(data.get("amount"))
-        amount_matches = [i for i in by_number if abs(money(i.total) - amount) <= max(0.01, money(i.total) * 0.01)]
-        if len(amount_matches) == 1:
-            invoice = amount_matches[0]
-
-    if not supplier and invoice:
-        supplier = invoice.supplier
-
-    contract = invoice.contract if invoice else None
-    notes = []
-    notes.append("Fornecedor identificado" if supplier else "Fornecedor não identificado")
-    notes.append("Fatura identificada por número normalizado" if invoice else "Fatura não identificada")
-    amount = money(data.get("amount"))
-    if invoice and abs(money(invoice.total) - amount) <= max(0.01, money(invoice.total) * 0.01):
-        notes.append("Valor compatível")
-    elif invoice:
-        notes.append("Valor divergente")
-    status = "Conferido" if supplier and invoice and (not invoice.total or abs(money(invoice.total) - amount) <= max(0.01, money(invoice.total) * 0.01)) else "Por conferir"
-    return supplier, invoice, contract, status, "; ".join(notes)
+        candidates=SupplierInvoice.query.filter_by(supplier_id=supplier.id).all() if supplier else SupplierInvoice.query.all()
+    by_number=[i for i in candidates if _invoice_number_matches(invoice_number, i.number)] if invoice_number else []
+    if len(by_number)==1:
+        invoice=by_number[0]
+    elif len(by_number)>1:
+        amount=money(data.get("amount"))
+        amount_matches=[i for i in by_number if abs(money(i.total)-amount)<=max(0.01,money(i.total)*0.01)]
+        if len(amount_matches)==1: invoice=amount_matches[0]
+    if not supplier and invoice: supplier=invoice.supplier
+    contract=invoice.contract if invoice else None
+    notes=[]
+    if supplier: notes.append("Fornecedor identificado")
+    else: notes.append("Fornecedor não identificado")
+    if invoice: notes.append("Fatura identificada por número normalizado")
+    else: notes.append("Fatura não identificada")
+    amount=money(data.get("amount"))
+    if invoice and abs(money(invoice.total)-amount) <= max(0.01, money(invoice.total)*0.01): notes.append("Valor compatível")
+    elif invoice: notes.append("Valor divergente")
+    status="Conferido" if supplier and invoice and (not invoice.total or abs(money(invoice.total)-amount)<=max(0.01,money(invoice.total)*0.01)) else "Por conferir"
+    return supplier,invoice,contract,status,"; ".join(notes)
 
 # -----------------------------------------------------------------------------
 # Legal rules and compliance engine. This is a rules assistant, not a legal
@@ -1963,27 +1935,6 @@ def import_payment_documents():
             match_cache={}
             supplier_pool=Supplier.query.all()
             invoice_pool=SupplierInvoice.query.all()
-            # Build lookup indexes once.  The old implementation scanned the
-            # entire invoice list for every row, which made a 2,918-row SIGFE
-            # import exceed the Render/Gunicorn request timeout.
-            supplier_by_nif={}
-            supplier_by_name={}
-            for s in supplier_pool:
-                if s.nif:
-                    supplier_by_nif.setdefault(str(s.nif).strip(), s)
-                key=_normalize_match_text(s.name)
-                if key:
-                    supplier_by_name.setdefault(key, s)
-
-            invoice_by_supplier_number={}
-            invoice_by_number={}
-            for inv in invoice_pool:
-                for key in _invoice_number_keys(inv.number):
-                    invoice_by_supplier_number.setdefault((inv.supplier_id, key), []).append(inv)
-                    invoice_by_number.setdefault(key, []).append(inv)
-
-            batch_size=max(50, int(os.environ.get("CHIVUGEST_IMPORT_BATCH_SIZE", "200")))
-            pending=0
             for r in rows:
                 beneficiary = str(row_value(r,"fornecedor","supplier","emitente","beneficiario") or "").strip()
                 nif = str(row_value(r,"nif","nuit","tax_id") or "").strip()
@@ -2035,11 +1986,7 @@ def import_payment_documents():
                 if cache_key in match_cache:
                     supplier,invoice,contract,recon_status,recon_notes=match_cache[cache_key]
                 else:
-                    supplier,invoice,contract,recon_status,recon_notes=match_payment_order(
-                        parsed, supplier_pool=supplier_pool, invoice_pool=invoice_pool,
-                        supplier_by_nif=supplier_by_nif, supplier_by_name=supplier_by_name,
-                        invoice_by_supplier_number=invoice_by_supplier_number, invoice_by_number=invoice_by_number
-                    )
+                    supplier,invoice,contract,recon_status,recon_notes=match_payment_order(parsed, supplier_pool=supplier_pool, invoice_pool=invoice_pool)
                     match_cache[cache_key]=(supplier,invoice,contract,recon_status,recon_notes)
                 if not supplier:
                     sname=(parsed.get("supplier") or "Fornecedor a identificar").strip()
@@ -2051,15 +1998,7 @@ def import_payment_documents():
                 doc=SourceDocument(document_type=source_type,document_number=parsed["os_number"],supplier_id=supplier.id,source_filename=f.filename,source_hash=parsed["hash"],issue_date=parsed["date_parsed"],amount=parsed["amount"],extracted_data=json.dumps(parsed,ensure_ascii=False),import_confidence=parsed["confidence"])
                 osr=PaymentOrder(os_number=parsed["os_number"],supplier_id=supplier.id,invoice_id=invoice.id if invoice else None,contract_id=contract.id if contract else None,framework_agreement_id=(contract.framework_agreement_id if contract else (invoice.framework_agreement_id if invoice else None)),issue_date=parsed["date_parsed"],amount=parsed["amount"],status=normalize_os_status(parsed["status"]),bank_reference=parsed["bank_reference"],source_type=source_type,source_filename=f.filename,source_hash=parsed["hash"],extracted_data=json.dumps(parsed,ensure_ascii=False),reconciliation_status=recon_status,reconciliation_notes=recon_notes)
                 db.session.add_all([doc,osr]); created+=1
-                pending += 1
-                if pending >= batch_size:
-                    db.session.commit()
-                    # Keep the SQLAlchemy identity map small during large XLSX
-                    # imports so the Render worker does not grow until timeout.
-                    db.session.expire_all()
-                    pending = 0
-            if pending:
-                db.session.commit()
+            db.session.commit()
         else:
             parsed=extract_generic_source_document(f)
             if SourceDocument.query.filter_by(source_hash=parsed["hash"]).first() or PaymentOrder.query.filter_by(source_hash=parsed["hash"]).first():
