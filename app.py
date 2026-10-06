@@ -423,7 +423,14 @@ def parse_date(v, default="__TODAY__"):
     if v is None or str(v).strip() == "":
         return date.today() if default == "__TODAY__" else default
     s = str(v).strip()
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%Y/%m/%d"):
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",
+        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",
+        "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M",
+        "%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M",
+        "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M",
+        "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%Y/%m/%d"
+    ):
         try: return datetime.strptime(s, fmt).date()
         except ValueError: pass
     return default or date.today()
@@ -473,11 +480,11 @@ def normalize_key(k):
         "factura":"fatura", "n_fatura":"numero", "n_da_fatura":"numero", "numero_fatura":"numero",
         "numero_da_fatura":"numero", "invoice_number":"numero", "invoice_no":"numero",
         "documento":"numero", "doc":"numero",
-        "fornecedor":"fornecedor", "supplier":"fornecedor", "nome_fornecedor":"fornecedor", "emitente":"fornecedor",
+        "fornecedor":"fornecedor", "supplier":"fornecedor", "nome_fornecedor":"fornecedor", "emitente":"fornecedor", "beneficiario":"fornecedor", "beneficiario_do_pagamento":"fornecedor",
         "nuit":"nif", "vat_number":"nif", "tax_id":"nif", "tin":"nif",
-        "data_emissao":"data", "issue_date":"data", "invoice_date":"data", "data_fatura":"data", "data_os":"data",
+        "data_emissao":"data", "issue_date":"data", "invoice_date":"data", "data_fatura":"data", "data_os":"data", "data_emissao_os":"data_os", "data_confirmacao_pagamento":"data_confirmacao_pagamento", "data_pagamento":"data_confirmacao_pagamento",
         "due_date":"vencimento", "data_vencimento":"vencimento", "data_limite":"vencimento",
-        "valor_total":"total", "total_fatura":"total", "valor":"total", "valor_os":"total",
+        "valor_total":"total", "total_fatura":"total", "valor":"total", "valor_os":"total", "valor_total_mn":"valor_total_mn", "valor_os_mn":"valor_os_mn", "valor_da_os_mn":"valor_os_mn", "valor_total_me":"valor_total_me", "valor_os_me":"valor_os_me",
         "montante":"total", "amount":"total", "grand_total":"total",
         "subtotal":"subtotal", "base_tributavel":"subtotal", "iva":"iva", "vat":"iva", "imposto":"iva",
         "moeda":"currency", "meio_pagamento":"metodo", "payment_method":"metodo", "metodo_pagamento":"metodo",
@@ -486,8 +493,8 @@ def normalize_key(k):
         "descricao":"descricao", "description":"descricao",
         "ordem_de_saque":"ordem_de_saque", "ordem_saque":"ordem_saque", "numero_ordem":"numero_ordem",
         "numero_da_ordem":"numero_ordem", "numero_os":"numero_os", "numero_da_os":"numero_os",
-        "n_os":"n_os", "n_da_os":"n_os", "os_numero":"numero_os",
-        "situacao":"situacao", "situacao_os":"situacao", "estado":"estado", "status":"status"
+        "n_os":"n_os", "no_os":"n_os", "n_da_os":"n_os", "no_da_os":"n_os", "os_numero":"numero_os",
+        "situacao":"situacao", "situacao_os":"situacao", "estado":"estado", "status":"status", "numero_bancario":"numero_bancario", "no_bancario":"numero_bancario", "no_bancario_de_origem":"numero_bancario_origem", "finalidade_os":"finalidade_os", "finalidade_da_os":"finalidade_os", "numero_contrato":"numero_contrato", "no_contrato":"numero_contrato"
     }
     return aliases.get(s, s)
 
@@ -560,6 +567,15 @@ def _extract_invoice_number(text_value):
             m=re.search(r"\b(?:FT|FA|FAC|FR|INV)[\s./_-]*([A-Z0-9./_-]+)", tail, re.I)
             if m:
                 return m.group(0).strip()
+    # SIGFE DocFonte frequently uses forms such as "Fatura n.º PI22L000044"
+    # and "Ft. N.º 584K0AO220007".  The dot between N and the ordinal sign
+    # must be accepted explicitly; otherwise the invoice number is lost.
+    direct = regex_first(text_value, [
+        r"\b(?:fatura|factura|invoice|ft\.?|fa\.)\s*(?:n\s*[.ºo°]*|no|número|numero)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9./_-]{2,})",
+        r"(?:n\s*[.ºo°]+|n[ºo°]|no|número|numero)\s*[:#-]?\s*([A-Z0-9][A-Z0-9./_-]{2,})"
+    ])
+    if direct:
+        return direct
     return regex_first(text_value, [
         r"\b((?:FT|FA|FR|FAC|INV)[\s./_-]*[A-Z0-9_-]{1,})\b",
         r"(?:n[ºo°]|no|número|numero)\s*[:#-]?\s*([A-Z0-9./_-]{2,})"
@@ -869,7 +885,7 @@ def uploaded_rows(f):
     """
     name = (f.filename or "").lower()
     max_rows = int(os.environ.get("CHIVUGEST_IMPORT_MAX_ROWS", "5000"))
-    max_cols = int(os.environ.get("CHIVUGEST_IMPORT_MAX_COLUMNS", "40"))
+    max_cols = max(100, int(os.environ.get("CHIVUGEST_IMPORT_MAX_COLUMNS", "100")))
     if name.endswith(".xlsx"):
         if not load_workbook: raise ValueError("openpyxl não instalado.")
         wb = load_workbook(f, read_only=True, data_only=True)
@@ -878,7 +894,7 @@ def uploaded_rows(f):
             rows_iter = ws.iter_rows(min_row=1, max_row=max_rows + 30, max_col=max_cols, values_only=True)
             preview = []
             header_idx = None
-            known = {"fornecedor", "nif", "ordem_de_saque", "ordem_saque", "numero_os", "n_os", "fatura", "numero", "data", "total", "valor", "situacao", "estado"}
+            known = {"fornecedor", "beneficiario", "nif", "ordem_de_saque", "ordem_saque", "numero_os", "n_os", "no_os", "fatura", "numero", "data", "data_emissao_os", "data_confirmacao_pagamento", "total", "valor", "valor_total_mn", "valor_os_mn", "situacao", "situacao_os", "estado", "finalidade_os", "finalidade_da_os"}
             for idx, row in enumerate(rows_iter, start=1):
                 vals = list(row)
                 norm = [normalize_key(v) for v in vals]
@@ -1919,15 +1935,45 @@ def import_payment_documents():
             supplier_pool=Supplier.query.all()
             invoice_pool=SupplierInvoice.query.all()
             for r in rows:
+                beneficiary = str(row_value(r,"fornecedor","supplier","emitente","beneficiario") or "").strip()
+                nif = str(row_value(r,"nif","nuit","tax_id") or "").strip()
+                # SIGFE DocFonte exports the taxpayer ID and supplier name in a
+                # single Beneficiário field, e.g. "5417096563 - Empresa, Lda".
+                # Split it only when the delimiter is present so foreign IDs
+                # such as DE315879502 are preserved as well.
+                if beneficiary and " - " in beneficiary:
+                    possible_nif, possible_name = beneficiary.split(" - ", 1)
+                    if not nif and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{3,30}", possible_nif.strip()):
+                        nif = possible_nif.strip()
+                    beneficiary_name = possible_name.strip() or beneficiary
+                else:
+                    beneficiary_name = beneficiary
+
+                finalidade = str(row_value(r,"finalidade_os","finalidade_da_os","finalidade") or "").strip()
+                invoice_number = str(row_value(r,"fatura","factura","numero_fatura","invoice_number") or "").strip()
+                if not invoice_number and finalidade:
+                    invoice_number = _extract_invoice_number(finalidade) or regex_first(finalidade, [
+                        r"\b(?:fatura|factura|ft\.?|fa\.)\s*(?:n\s*[.ºo°]*|no|número|numero)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9./_-]+)",
+                        r"(?:n\s*[.ºo°]+|n[ºo°]|no|número|numero)\s*[:#-]?\s*([A-Z0-9][A-Z0-9./_-]{2,})"
+                    ])
+
+                date_value = row_value(r,"data_emissao_os","data_os","data")
+                if date_value in (None, ""):
+                    date_value = row_value(r,"data_confirmacao_pagamento","data_pagamento")
+
+                amount_value = row_value(r,"valor_total_mn","valor_os_mn","valor","valor_os","montante","amount","total")
                 parsed={
-                    "os_number": str(row_value(r,"ordem_saque","ordem_de_saque","os","numero_os","n_os","ordem","numero_ordem","referencia")).strip(),
-                    "supplier": str(row_value(r,"fornecedor","supplier","emitente","beneficiario","beneficiario")).strip(),
-                    "nif": str(row_value(r,"nif","nuit","tax_id")).strip(),
-                    "invoice_number": str(row_value(r,"fatura","factura","numero_fatura","invoice_number","documento")).strip(),
-                    "date": row_value(r,"data","data_emissao","issue_date","data_os"),
-                    "amount": num(row_value(r,"valor","valor_os","montante","amount","total")),
+                    "os_number": str(row_value(r,"ordem_saque","ordem_de_saque","os","numero_os","n_os","ordem","numero_ordem") or "").strip(),
+                    "supplier": beneficiary_name,
+                    "nif": nif,
+                    "invoice_number": invoice_number,
+                    "date": date_value,
+                    "amount": num(amount_value),
                     "status": str(row_value(r,"situacao","situacao_os","status","estado") or "Pendente").strip(),
-                    "bank_reference": str(row_value(r,"referencia_bancaria","referencia_banco","bank_reference","referencia")).strip(),
+                    "bank_reference": str(row_value(r,"numero_bancario","referencia_bancaria","referencia_banco","bank_reference","referencia") or "").strip(),
+                    "finalidade": finalidade,
+                    "contract_number": str(row_value(r,"numero_contrato","contrato","contract") or "").strip(),
+                    "source_value_mn": num(row_value(r,"valor_total_mn")),
                 }
                 parsed["date_parsed"]=parse_date(parsed.get("date"),None); parsed["filename"]=f.filename
                 parsed["confidence"]=min(100, sum(bool(parsed.get(k)) for k in ("os_number","supplier","invoice_number","date","amount"))*20 + (10 if parsed.get("nif") else 0))
