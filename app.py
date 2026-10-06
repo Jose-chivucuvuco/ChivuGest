@@ -3068,6 +3068,75 @@ def admin_edit(model, record_id):
             db.session.rollback(); flash("Não foi possível alterar o registo: "+str(e))
     return render_template("admin_edit.html", obj=obj, specs=specs, model=model)
 
+
+@app.route("/admin/delete/suppliers-bulk", methods=["POST"])
+@login_required
+@admin_required
+def admin_delete_suppliers_bulk():
+    raw_ids = request.form.getlist("supplier_ids")
+    try:
+        ids = sorted({int(x) for x in raw_ids if str(x).isdigit()})
+    except Exception:
+        ids = []
+    if not ids:
+        flash("Selecione pelo menos um fornecedor.")
+        return redirect(url_for("suppliers"))
+    deleted = 0
+    skipped = []
+    try:
+        for sid in ids:
+            supplier = db.session.get(Supplier, sid)
+            if not supplier:
+                continue
+
+            # Só removemos automaticamente dados de origem DocFonte/O.S.
+            for po in PaymentOrder.query.filter_by(supplier_id=sid).all():
+                if (po.source_type or "").strip().lower() == "docfonte":
+                    db.session.delete(po)
+                else:
+                    skipped.append((supplier.name, "possui pagamentos/OS não provenientes do DocFonte"))
+                    break
+            else:
+                for sd in SourceDocument.query.filter_by(supplier_id=sid).all():
+                    if (sd.document_type or "").strip().lower() == "docfonte":
+                        db.session.delete(sd)
+                    else:
+                        skipped.append((supplier.name, "possui documentos que não são DocFonte"))
+                        break
+                else:
+                    # Não apagar fornecedor que tenha dados operacionais independentes.
+                    deps = []
+                    if SupplierInvoice.query.filter_by(supplier_id=sid).first(): deps.append("faturas")
+                    if SupplierPayment.query.filter_by(supplier_id=sid).first(): deps.append("pagamentos")
+                    if Contract.query.filter_by(supplier_id=sid).first(): deps.append("contratos")
+                    if ProcurementProcedure.query.filter_by(supplier_id=sid).first(): deps.append("procedimentos")
+                    if deps:
+                        skipped.append((supplier.name, "possui " + ", ".join(deps)))
+                        continue
+
+                    # Alertas são derivados e podem ser removidos com o fornecedor.
+                    ComplianceAlert.query.filter_by(supplier_id=sid).delete(synchronize_session=False)
+                    # Retira a associação aos Acordos-Quadro antes da eliminação.
+                    db.session.execute(
+                        framework_supplier.delete().where(framework_supplier.c.supplier_id == sid)
+                    )
+                    db.session.delete(supplier)
+                    deleted += 1
+
+        db.session.commit()
+        audit("BULK_DELETE_SUPPLIERS", "Supplier", None,
+              f"Fornecedores eliminados em lote: {deleted}; selecionados: {len(ids)}")
+        msg = f"{deleted} fornecedor(es) eliminado(s)."
+        if skipped:
+            msg += " " + str(len(skipped)) + " não eliminado(s) por possuírem dados relacionados."
+            for name, reason in skipped[:5]:
+                msg += f" {name}: {reason}."
+        flash(msg)
+    except Exception as e:
+        db.session.rollback()
+        flash("Erro ao eliminar fornecedores em lote: " + str(e))
+    return redirect(url_for("suppliers"))
+
 @app.route("/admin/delete/<model>/<int:record_id>", methods=["POST"])
 @login_required
 @admin_required

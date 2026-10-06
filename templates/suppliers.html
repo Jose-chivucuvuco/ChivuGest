@@ -1,4 +1,54 @@
 {% extends "base.html" %}{% block content %}
 <div class="pagehead"><div><h1>Fornecedores</h1><p class="muted">Cadastro independente do procedimento. O fornecedor pode participar em vários procedimentos e Acordos-Quadro.</p></div></div>
 <div class="panel"><h2>Novo fornecedor</h2><form method="post" class="form three"><input name="name" placeholder="Nome / Razão social" required><input name="nif" placeholder="NIF / NUIT"><input name="phone" placeholder="Telefone"><input name="email" type="email" placeholder="E-mail"><input name="address" placeholder="Morada"><input name="category" placeholder="Categoria / actividade"><textarea name="notes" placeholder="Observações"></textarea><button>Guardar fornecedor</button></form></div>
-<div class="panel"><div class="panelhead"><h2>Fornecedores cadastrados</h2><span>{{rows|length}}</span></div><table><tr><th>Fornecedor</th><th>NIF</th><th>Categoria / actividade</th><th>Contacto</th><th>Acordos-Quadro</th>{% if session.role=='admin' %}<th>Ações</th>{% endif %}</tr>{% for r in rows %}<tr><td><b>{{r.name}}</b></td><td>{{r.nif or '—'}}</td><td>{{r.category or '—'}}</td><td>{{r.phone or r.email or '—'}}</td><td>{% if r.framework_agreements %}{% for fa in r.framework_agreements %}<span class="badge">{{fa.code}}</span> {% endfor %}{% else %}—{% endif %}</td>{% if session.role=='admin' %}<td><a class="btn small secondary" href="/admin/edit/supplier/{{r.id}}">Editar</a> <form method="post" action="/admin/delete/supplier/{{r.id}}" style="display:inline" onsubmit="return confirm('Eliminar este fornecedor?')"><button class="btn small danger">Eliminar</button></form></td>{% endif %}</tr>{% endfor %}</table></div>{% endblock %}
+<div class="panel">
+  <div class="panelhead">
+    <h2>Fornecedores cadastrados</h2><span>{{rows|length}}</span>
+  </div>
+  {% if session.role=='admin' %}
+  <form method="post" action="/admin/delete/suppliers-bulk" id="bulkSupplierForm" onsubmit="return confirmBulkSupplierDelete()">
+    <div style="display:flex;gap:10px;align-items:center;margin:10px 0 14px;flex-wrap:wrap">
+      <button type="button" class="btn small secondary" onclick="toggleAllSuppliers()">Selecionar todos</button>
+      <button type="submit" class="btn small danger">Eliminar selecionados</button>
+      <span class="muted" id="supplierSelectedCount">0 selecionados</span>
+    </div>
+  {% endif %}
+  <table>
+    <tr>{% if session.role=='admin' %}<th style="width:40px"><input type="checkbox" id="selectAllSuppliers" onclick="setAllSuppliers(this.checked)" aria-label="Selecionar todos"></th>{% endif %}
+      <th>Fornecedor</th><th>NIF</th><th>Categoria / actividade</th><th>Contacto</th><th>Acordos-Quadro</th>{% if session.role=='admin' %}<th>Ações</th>{% endif %}</tr>
+    {% for r in rows %}
+    <tr>
+      {% if session.role=='admin' %}<td><input type="checkbox" class="supplier-check" name="supplier_ids" value="{{r.id}}" onchange="updateSupplierSelectedCount()"></td>{% endif %}
+      <td><b>{{r.name}}</b></td><td>{{r.nif or '—'}}</td><td>{{r.category or '—'}}</td><td>{{r.phone or r.email or '—'}}</td>
+      <td>{% if r.framework_agreements %}{% for fa in r.framework_agreements %}<span class="badge">{{fa.code}}</span> {% endfor %}{% else %}—{% endif %}</td>
+      {% if session.role=='admin' %}<td><a class="btn small secondary" href="/admin/edit/supplier/{{r.id}}">Editar</a> <form method="post" action="/admin/delete/supplier/{{r.id}}" style="display:inline" onsubmit="return confirm('Eliminar este fornecedor?')"><button class="btn small danger">Eliminar</button></form></td>{% endif %}
+    </tr>
+    {% endfor %}
+  </table>
+  {% if session.role=='admin' %}</form>{% endif %}
+</div>
+{% if session.role=='admin' %}
+<script>
+function selectedSupplierBoxes(){ return Array.from(document.querySelectorAll('.supplier-check')); }
+function updateSupplierSelectedCount(){
+  const boxes=selectedSupplierBoxes();
+  const n=boxes.filter(x=>x.checked).length;
+  const el=document.getElementById('supplierSelectedCount'); if(el) el.textContent=n+' selecionado'+(n===1?'':'s');
+  const all=document.getElementById('selectAllSuppliers');
+  if(all) all.checked=boxes.length>0 && n===boxes.length;
+}
+function setAllSuppliers(v){ selectedSupplierBoxes().forEach(x=>x.checked=v); updateSupplierSelectedCount(); }
+function toggleAllSuppliers(){
+  const boxes=selectedSupplierBoxes();
+  const allSelected=boxes.length>0 && boxes.every(x=>x.checked);
+  setAllSuppliers(!allSelected);
+}
+function confirmBulkSupplierDelete(){
+  const n=selectedSupplierBoxes().filter(x=>x.checked).length;
+  if(!n){ alert('Selecione pelo menos um fornecedor.'); return false; }
+  return confirm('Tem certeza que deseja eliminar '+n+' fornecedor'+(n===1?'':'es')+' selecionado'+(n===1?'':'s')+'? Registos relacionados que impedirem a eliminação serão preservados.');
+}
+updateSupplierSelectedCount();
+</script>
+{% endif %}
+{% endblock %}
