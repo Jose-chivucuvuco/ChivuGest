@@ -272,6 +272,8 @@ class SourceDocument(db.Model):
     amount = db.Column(db.Numeric(18,2), default=0)
     extracted_data = db.Column(db.Text)
     import_confidence = db.Column(db.Integer, default=0)
+    reconciliation_status = db.Column(db.String(50), default="Por conferir")
+    reconciliation_notes = db.Column(db.Text)
     content = db.Column(db.LargeBinary)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     supplier = db.relationship("Supplier", backref="source_documents")
@@ -2191,7 +2193,9 @@ def import_payment_documents():
                     "issue_date":parsed["date_parsed"],
                     "amount":parsed["amount"],
                     "extracted_data":extracted,
-                    "import_confidence":parsed["confidence"]
+                    "import_confidence":parsed["confidence"],
+                    "reconciliation_status":recon_status,
+                    "reconciliation_notes":recon_notes
                 })
                 # DocFonte não cria PaymentOrder; mantém apenas o documento-fonte.
                 if source_type_key != "docfonte":
@@ -3088,6 +3092,80 @@ def admin_edit(model, record_id):
     return render_template("admin_edit.html", obj=obj, specs=specs, model=model)
 
 
+@app.route("/payments/source-document/<int:doc_id>/reconcile", methods=["POST"])
+@login_required
+def reconcile_source_document(doc_id):
+    doc = db.session.get(SourceDocument, doc_id)
+    if not doc:
+        flash("Documento Fonte não encontrado.")
+        return redirect(url_for("supplier_payments"))
+    try:
+        data = json.loads(doc.extracted_data or "{}")
+        supplier = Supplier.query.get(doc.supplier_id) if doc.supplier_id else None
+        invoice = SupplierInvoice.query.get(doc.invoice_id) if doc.invoice_id else None
+        # Re-run the same matching logic using the original extracted data.
+        supplier2, invoice2, contract2, status, notes = match_payment_order(data)
+        supplier = supplier2 or supplier
+        invoice = invoice2 or invoice
+        contract = contract2 or (invoice.contract if invoice else None)
+        doc.supplier_id = supplier.id if supplier else doc.supplier_id
+        doc.invoice_id = invoice.id if invoice else None
+        doc.contract_id = contract.id if contract else None
+        doc.framework_agreement_id = (contract.framework_agreement_id if contract else (invoice.framework_agreement_id if invoice else None))
+        doc.reconciliation_status = status
+        doc.reconciliation_notes = notes
+        db.session.commit()
+        flash(f"Documento {doc.document_number or doc.id} recruzado: {status}.")
+    except Exception as e:
+        db.session.rollback(); flash("Erro ao cruzar Documento Fonte: " + str(e))
+    return redirect(url_for("supplier_payments"))
+
+@app.route("/payments/source-document/<int:doc_id>/associate", methods=["POST"])
+@login_required
+def associate_source_document(doc_id):
+    doc = db.session.get(SourceDocument, doc_id)
+    if not doc:
+        flash("Documento Fonte não encontrado.")
+        return redirect(url_for("supplier_payments"))
+    try:
+        invoice_id = int(request.form.get("invoice_id"))
+        invoice = db.session.get(SupplierInvoice, invoice_id)
+        if not invoice:
+            raise ValueError("Factura inválida.")
+        if doc.supplier_id and invoice.supplier_id != doc.supplier_id:
+            raise ValueError("A factura seleccionada pertence a outro fornecedor.")
+        if doc.amount and invoice.total and abs(money(doc.amount) - money(invoice.total)) > max(0.01, money(invoice.total) * 0.01):
+            doc.reconciliation_status = "Divergência de valor"
+            doc.reconciliation_notes = f"Factura {invoice.number} associada manualmente, mas o valor do DocFonte diverge do total da factura."
+        else:
+            doc.reconciliation_status = "Cruzado com factura"
+            doc.reconciliation_notes = f"Factura {invoice.number} associada manualmente."
+        doc.invoice_id = invoice.id
+        doc.supplier_id = invoice.supplier_id
+        doc.contract_id = invoice.contract_id
+        doc.framework_agreement_id = invoice.framework_agreement_id or (invoice.contract.framework_agreement_id if invoice.contract else None)
+        db.session.commit()
+        flash(f"Documento {doc.document_number or doc.id} associado à factura {invoice.number}.")
+    except Exception as e:
+        db.session.rollback(); flash("Erro ao associar factura: " + str(e))
+    return redirect(url_for("supplier_payments"))
+
+@app.route("/payments/source-document/<int:doc_id>/confirm", methods=["POST"])
+@login_required
+def confirm_source_document(doc_id):
+    doc = db.session.get(SourceDocument, doc_id)
+    if not doc:
+        flash("Documento Fonte não encontrado.")
+        return redirect(url_for("supplier_payments"))
+    try:
+        doc.reconciliation_status = "Conferido"
+        doc.reconciliation_notes = ((doc.reconciliation_notes or "") + ("; " if doc.reconciliation_notes else "") + "Conferido manualmente pelo utilizador")
+        db.session.commit()
+        flash(f"Documento {doc.document_number or doc.id} marcado como conferido.")
+    except Exception as e:
+        db.session.rollback(); flash("Erro ao confirmar Documento Fonte: " + str(e))
+    return redirect(url_for("supplier_payments"))
+
 @app.route("/admin/cleanup/docfonte-orders", methods=["POST"])
 @login_required
 @admin_required
@@ -3322,6 +3400,8 @@ def ensure_schema():
     add_column("source_document", "contract_id", "INTEGER")
     add_column("source_document", "framework_agreement_id", "INTEGER")
     add_column("source_document", "content", "BYTEA" if db.engine.dialect.name == "postgresql" else "BLOB")
+    add_column("source_document", "reconciliation_status", "VARCHAR(50)")
+    add_column("source_document", "reconciliation_notes", "TEXT")
     # Existing suppliers remain valid; this field is now legacy and no longer used by the UI.
     with db.engine.begin() as conn:
         conn.execute(text("UPDATE supplier SET contracting_type='Não aplicável' WHERE contracting_type IS NULL OR contracting_type=''"))
