@@ -3213,8 +3213,13 @@ def confirm_source_document(doc_id):
         invoice = db.session.get(SupplierInvoice, doc.invoice_id) if doc.invoice_id else None
         created_payment = False
         if invoice:
-            amount = money(doc.amount)
-            if amount <= 0:
+            # Normalise valores financeiros para Decimal nesta operação.
+            # Os modelos SQLAlchemy usam Numeric/Decimal, enquanto a função money()
+            # historicamente devolve float; misturar ambos causava o erro:
+            # "unsupported operand type(s) for +: 'float' and 'decimal.Decimal'".
+            amount = Decimal(str(money(doc.amount)))
+            total = Decimal(str(money(invoice.total)))
+            if amount <= Decimal("0.00"):
                 raise ValueError("O Documento Fonte não possui um valor válido para actualizar o pagamento.")
             # Evita criar o mesmo pagamento duas vezes para o mesmo Documento Fonte.
             existing = SupplierPayment.query.filter(
@@ -3222,8 +3227,8 @@ def confirm_source_document(doc_id):
                 SupplierPayment.receipt == (doc.document_number or f"DOCFONTE-{doc.id}")
             ).first()
             if not existing:
-                current_paid = money(invoice.paid)
-                remaining = max(money(invoice.total) - current_paid, Decimal("0.00"))
+                current_paid = Decimal(str(money(invoice.paid)))
+                remaining = max(total - current_paid, Decimal("0.00"))
                 if amount > remaining + Decimal("0.01"):
                     raise ValueError(f"O valor do Documento Fonte (Kz {amount:,.2f}) ultrapassa o saldo da factura (Kz {remaining:,.2f}).")
                 payment_date = doc.issue_date or datetime.utcnow().date()
@@ -3241,12 +3246,12 @@ def confirm_source_document(doc_id):
                 )
                 db.session.add(payment)
                 invoice.paid = current_paid + amount
-                invoice.status = "Paga" if invoice.paid >= money(invoice.total) else "Parcial"
+                invoice.status = "Paga" if invoice.paid >= total else "Parcial"
                 created_payment = True
             else:
                 # Garante que a factura continue reflectindo o pagamento já existente.
-                invoice.paid = max(money(invoice.paid), money(existing.amount))
-                invoice.status = "Paga" if invoice.paid >= money(invoice.total) else "Parcial"
+                invoice.paid = max(Decimal(str(money(invoice.paid))), Decimal(str(money(existing.amount))))
+                invoice.status = "Paga" if invoice.paid >= total else "Parcial"
 
         doc.reconciliation_status = "Conferido"
         note = "Conferido manualmente pelo utilizador"
