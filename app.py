@@ -1965,18 +1965,29 @@ def supplier_payments():
             db.session.add(p); db.session.commit(); flash("Pagamento registado com rastreabilidade ao Acordo-Quadro/contrato.")
         except Exception as e:
             db.session.rollback(); flash("Erro no pagamento: "+str(e))
-    return render_template("supplier_payments.html", rows=SupplierPayment.query.order_by(SupplierPayment.id.desc()).all(), orders=PaymentOrder.query.order_by(PaymentOrder.id.desc()).limit(200).all(), suppliers=suppliers_list, invoices=invoices, contracts=contracts, framework_agreements=framework_agreements)
+    orders=PaymentOrder.query.filter(func.lower(PaymentOrder.source_type) != "docfonte").order_by(PaymentOrder.id.desc()).limit(200).all()
+    source_documents=SourceDocument.query.order_by(SourceDocument.id.desc()).limit(200).all()
+    return render_template("supplier_payments.html", rows=SupplierPayment.query.order_by(SupplierPayment.id.desc()).all(), orders=orders, source_documents=source_documents, suppliers=suppliers_list, invoices=invoices, contracts=contracts, framework_agreements=framework_agreements)
 
 @app.route("/payments/import-documents", methods=["POST"])
 @login_required
 def import_payment_documents():
     f=request.files.get("file")
     source_type=request.form.get("source_type","DocFonte")
+    source_type_key=(source_type or "DocFonte").strip().lower()
     if not f or not f.filename:
         flash("Selecione um ficheiro para importar."); return redirect(url_for("supplier_payments"))
     try:
         filename=(f.filename or "").lower()
         created=0
+        legacy_docfonte_orders_removed=0
+        # DocFonte é documento-fonte para análise/rastreabilidade; não cria OS/pagamento.
+        # Remove apenas OS legadas criadas pelo DocFonte por versões anteriores.
+        if source_type_key == "docfonte":
+            legacy_docfonte_orders_removed = PaymentOrder.query.filter(
+                func.lower(PaymentOrder.source_type) == "docfonte"
+            ).delete(synchronize_session=False)
+            db.session.commit()
         if filename.endswith((".csv", ".xlsx")):
             # Read the upload once. Reusing the bytes avoids repeated getvalue()/stream
             # operations for every row and keeps large DocFonte imports predictable.
@@ -2182,23 +2193,25 @@ def import_payment_documents():
                     "extracted_data":extracted,
                     "import_confidence":parsed["confidence"]
                 })
-                payment_rows.append({
-                    "os_number":parsed["os_number"],
-                    "supplier_id":supplier_id,
-                    "invoice_id":invoice.id if invoice else None,
-                    "contract_id":contract.id if contract else None,
-                    "framework_agreement_id":framework_id,
-                    "issue_date":parsed["date_parsed"],
-                    "amount":parsed["amount"],
-                    "status":normalize_os_status(parsed["status"]),
-                    "bank_reference":parsed["bank_reference"],
-                    "source_type":source_type,
-                    "source_filename":f.filename,
-                    "source_hash":parsed["hash"],
-                    "extracted_data":extracted,
-                    "reconciliation_status":recon_status,
-                    "reconciliation_notes":recon_notes
-                })
+                # DocFonte não cria PaymentOrder; mantém apenas o documento-fonte.
+                if source_type_key != "docfonte":
+                    payment_rows.append({
+                        "os_number":parsed["os_number"],
+                        "supplier_id":supplier_id,
+                        "invoice_id":invoice.id if invoice else None,
+                        "contract_id":contract.id if contract else None,
+                        "framework_agreement_id":framework_id,
+                        "issue_date":parsed["date_parsed"],
+                        "amount":parsed["amount"],
+                        "status":normalize_os_status(parsed["status"]),
+                        "bank_reference":parsed["bank_reference"],
+                        "source_type":source_type,
+                        "source_filename":f.filename,
+                        "source_hash":parsed["hash"],
+                        "extracted_data":extracted,
+                        "reconciliation_status":recon_status,
+                        "reconciliation_notes":recon_notes
+                    })
                 created += 1
 
                 if len(source_rows) >= batch_size:
@@ -2208,7 +2221,7 @@ def import_payment_documents():
 
         else:
             parsed=extract_generic_source_document(f)
-            if SourceDocument.query.filter_by(source_hash=parsed["hash"]).first() or PaymentOrder.query.filter_by(source_hash=parsed["hash"]).first():
+            if SourceDocument.query.filter_by(source_hash=parsed["hash"]).first() or (source_type_key != "docfonte" and PaymentOrder.query.filter_by(source_hash=parsed["hash"]).first()):
                 raise ValueError("Este documento já foi importado anteriormente.")
             supplier,invoice,contract,recon_status,recon_notes=match_payment_order(parsed)
             if not supplier:
@@ -2218,9 +2231,15 @@ def import_payment_documents():
                     supplier=Supplier(name=sname,nif=parsed.get("nif") or None,contracting_type="Outro / Regime especial")
                     db.session.add(supplier); db.session.flush()
             doc=SourceDocument(document_type=source_type,document_number=parsed.get("os_number") or parsed.get("invoice_number") or None,supplier_id=supplier.id,source_filename=parsed["filename"],source_hash=parsed["hash"],issue_date=parsed.get("date_parsed"),amount=parsed.get("amount",0),extracted_data=json.dumps(parsed,ensure_ascii=False),import_confidence=parsed.get("confidence",0))
-            osr=PaymentOrder(os_number=parsed.get("os_number") or parsed.get("invoice_number") or "SEM-NUMERO",supplier_id=supplier.id,invoice_id=invoice.id if invoice else None,contract_id=contract.id if contract else None,framework_agreement_id=(contract.framework_agreement_id if contract else (invoice.framework_agreement_id if invoice else None)),issue_date=parsed.get("date_parsed"),amount=parsed.get("amount",0),status=normalize_os_status(parsed.get("status")),bank_reference=parsed.get("bank_reference"),source_type=source_type,source_filename=parsed["filename"],source_hash=parsed["hash"],extracted_data=json.dumps(parsed,ensure_ascii=False),reconciliation_status=recon_status,reconciliation_notes=recon_notes)
-            db.session.add_all([doc,osr]); created=1; db.session.commit()
-        flash(f"Importação concluída: {created} documento(s)/ordem(ns) de saque de empresas. {excluded_non_company} registo(s) de salários, pessoal e subsídios de deslocação foram excluídos automaticamente.")
+            db.session.add(doc)
+            if source_type_key != "docfonte":
+                osr=PaymentOrder(os_number=parsed.get("os_number") or parsed.get("invoice_number") or "SEM-NUMERO",supplier_id=supplier.id,invoice_id=invoice.id if invoice else None,contract_id=contract.id if contract else None,framework_agreement_id=(contract.framework_agreement_id if contract else (invoice.framework_agreement_id if invoice else None)),issue_date=parsed.get("date_parsed"),amount=parsed.get("amount",0),status=normalize_os_status(parsed.get("status")),bank_reference=parsed.get("bank_reference"),source_type=source_type,source_filename=parsed["filename"],source_hash=parsed["hash"],extracted_data=json.dumps(parsed,ensure_ascii=False),reconciliation_status=recon_status,reconciliation_notes=recon_notes)
+                db.session.add(osr)
+            created=1; db.session.commit()
+        if source_type_key == "docfonte":
+            flash(f"DocFonte importado como documento-fonte: {created} registo(s). Nenhuma Ordem de Saque foi criada. {legacy_docfonte_orders_removed} OS legada(s) do DocFonte foram removida(s). {excluded_non_company} registo(s) de salários, pessoal e subsídios de deslocação foram excluídos automaticamente.")
+        else:
+            flash(f"Importação concluída: {created} documento(s)/ordem(ns) de saque de empresas. {excluded_non_company} registo(s) de salários, pessoal e subsídios de deslocação foram excluídos automaticamente.")
     except Exception as e:
         db.session.rollback(); flash("Erro na importação do documento: "+str(e))
     return redirect(url_for("supplier_payments"))
@@ -3068,6 +3087,20 @@ def admin_edit(model, record_id):
             db.session.rollback(); flash("Não foi possível alterar o registo: "+str(e))
     return render_template("admin_edit.html", obj=obj, specs=specs, model=model)
 
+
+@app.route("/admin/cleanup/docfonte-orders", methods=["POST"])
+@login_required
+@admin_required
+def admin_cleanup_docfonte_orders():
+    try:
+        deleted = PaymentOrder.query.filter(func.lower(PaymentOrder.source_type) == "docfonte").delete(synchronize_session=False)
+        db.session.commit()
+        audit("DELETE", "PaymentOrder", 0, f"Limpeza de OS legadas do DocFonte: {deleted} registo(s)")
+        flash(f"Limpeza concluída: {deleted} Ordem(ns) de Saque criada(s) pelo DocFonte foram removidas. Os Documentos Fonte foram preservados.")
+    except Exception as e:
+        db.session.rollback()
+        flash("Erro na limpeza das OS do DocFonte: " + str(e))
+    return redirect(url_for("supplier_payments"))
 
 @app.route("/admin/delete/suppliers-bulk", methods=["POST"])
 @login_required
