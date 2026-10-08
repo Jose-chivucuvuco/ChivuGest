@@ -1258,13 +1258,52 @@ def match_payment_order(data, supplier_pool=None, invoice_pool=None, supplier_by
     else:
         by_number = []
 
+    amount = money(data.get("amount"))
+    source_date = data.get("date_parsed") or parse_date(data.get("date"), None)
+    tolerance = max(0.01, amount * 0.01)
+
+    # 1) Correspondência inequívoca pelo número da factura.
     if len(by_number) == 1:
         invoice = by_number[0]
     elif len(by_number) > 1:
-        amount = money(data.get("amount"))
         amount_matches = [i for i in by_number if abs(money(i.total) - amount) <= max(0.01, money(i.total) * 0.01)]
         if len(amount_matches) == 1:
             invoice = amount_matches[0]
+        elif len(amount_matches) > 1 and source_date:
+            dated = sorted(
+                [i for i in amount_matches if i.issue_date],
+                key=lambda i: abs((i.issue_date - source_date).days)
+            )
+            if len(dated) == 1 or (len(dated) >= 2 and
+                                   abs((dated[0].issue_date-source_date).days) <
+                                   abs((dated[1].issue_date-source_date).days)):
+                if abs((dated[0].issue_date-source_date).days) <= 30:
+                    invoice = dated[0]
+
+    # 2) Se o DocFonte não trouxer número de factura, procurar por
+    # fornecedor + valor. Só associar automaticamente quando houver uma
+    # única correspondência. Isto permite reconciliar os DocFonte actuais
+    # que chegam com a coluna FACTURA vazia.
+    if invoice is None and supplier and amount > 0:
+        supplier_candidates = invoice_pool if invoice_pool is not None else SupplierInvoice.query.filter_by(supplier_id=supplier.id).all()
+        supplier_candidates = [i for i in supplier_candidates if i.supplier_id == supplier.id]
+        amount_matches = [i for i in supplier_candidates if abs(money(i.total) - amount) <= max(0.01, money(i.total) * 0.01)]
+        if len(amount_matches) == 1:
+            invoice = amount_matches[0]
+            notes_reason = "fornecedor + valor"
+        elif len(amount_matches) > 1 and source_date:
+            dated = sorted(
+                [i for i in amount_matches if i.issue_date],
+                key=lambda i: abs((i.issue_date - source_date).days)
+            )
+            if dated:
+                best_distance = abs((dated[0].issue_date-source_date).days)
+                second_distance = abs((dated[1].issue_date-source_date).days) if len(dated) > 1 else None
+                # Só escolher automaticamente quando a factura mais próxima
+                # for claramente melhor e estiver num intervalo razoável.
+                if best_distance <= 30 and (second_distance is None or best_distance < second_distance):
+                    invoice = dated[0]
+                    notes_reason = "fornecedor + valor + data"
 
     if not supplier and invoice:
         supplier = invoice.supplier
@@ -1272,13 +1311,21 @@ def match_payment_order(data, supplier_pool=None, invoice_pool=None, supplier_by
     contract = invoice.contract if invoice else None
     notes = []
     notes.append("Fornecedor identificado" if supplier else "Fornecedor não identificado")
-    notes.append("Fatura identificada por número normalizado" if invoice else "Fatura não identificada")
-    amount = money(data.get("amount"))
-    if invoice and abs(money(invoice.total) - amount) <= max(0.01, money(invoice.total) * 0.01):
-        notes.append("Valor compatível")
+    if invoice:
+        if 'notes_reason' in locals():
+            notes.append(f"Fatura identificada por {notes_reason}")
+        elif by_number and invoice in by_number:
+            notes.append("Fatura identificada por número normalizado")
+        else:
+            notes.append("Fatura identificada por correspondência inequívoca")
+    else:
+        notes.append("Fatura não identificada")
+    if invoice and abs(money(invoice.total) - amount) <= tolerance:
+        notes.append("Valor compatível (tolerância de 1%)")
     elif invoice:
         notes.append("Valor divergente")
-    status = "Conferido" if supplier and invoice and (not invoice.total or abs(money(invoice.total) - amount) <= max(0.01, money(invoice.total) * 0.01)) else "Por conferir"
+
+    status = "Conferido" if supplier and invoice and abs(money(invoice.total) - amount) <= tolerance else "Por conferir"
     return supplier, invoice, contract, status, "; ".join(notes)
 
 # -----------------------------------------------------------------------------
