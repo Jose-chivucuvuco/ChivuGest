@@ -3205,10 +3205,63 @@ def confirm_source_document(doc_id):
         flash("Documento Fonte não encontrado.")
         return redirect(url_for("supplier_payments"))
     try:
+        # A confirmação é uma acção explícita do utilizador. O DocFonte não
+        # cria pagamentos durante a importação, mas, quando o utilizador
+        # confirma um documento já reconciliado com uma factura, actualizamos
+        # o estado financeiro da factura e criamos o pagamento apenas se ele
+        # ainda não existir. Isto mantém a rastreabilidade sem duplicações.
+        invoice = db.session.get(SupplierInvoice, doc.invoice_id) if doc.invoice_id else None
+        created_payment = False
+        if invoice:
+            amount = money(doc.amount)
+            if amount <= 0:
+                raise ValueError("O Documento Fonte não possui um valor válido para actualizar o pagamento.")
+            # Evita criar o mesmo pagamento duas vezes para o mesmo Documento Fonte.
+            existing = SupplierPayment.query.filter(
+                SupplierPayment.invoice_id == invoice.id,
+                SupplierPayment.receipt == (doc.document_number or f"DOCFONTE-{doc.id}")
+            ).first()
+            if not existing:
+                current_paid = money(invoice.paid)
+                remaining = max(money(invoice.total) - current_paid, Decimal("0.00"))
+                if amount > remaining + Decimal("0.01"):
+                    raise ValueError(f"O valor do Documento Fonte (Kz {amount:,.2f}) ultrapassa o saldo da factura (Kz {remaining:,.2f}).")
+                payment_date = doc.issue_date or datetime.utcnow().date()
+                payment = SupplierPayment(
+                    receipt=doc.document_number or f"DOCFONTE-{doc.id}",
+                    supplier_id=invoice.supplier_id,
+                    invoice_id=invoice.id,
+                    contract_id=invoice.contract_id,
+                    framework_agreement_id=invoice.framework_agreement_id or (invoice.contract.framework_agreement_id if invoice.contract else None),
+                    date=payment_date,
+                    method="Ordem de Saque",
+                    amount=amount,
+                    reference=doc.document_number,
+                    notes=f"Pagamento criado a partir da confirmação do Documento Fonte {doc.document_number or doc.id}."
+                )
+                db.session.add(payment)
+                invoice.paid = current_paid + amount
+                invoice.status = "Paga" if invoice.paid >= money(invoice.total) else "Parcial"
+                created_payment = True
+            else:
+                # Garante que a factura continue reflectindo o pagamento já existente.
+                invoice.paid = max(money(invoice.paid), money(existing.amount))
+                invoice.status = "Paga" if invoice.paid >= money(invoice.total) else "Parcial"
+
         doc.reconciliation_status = "Conferido"
-        doc.reconciliation_notes = ((doc.reconciliation_notes or "") + ("; " if doc.reconciliation_notes else "") + "Conferido manualmente pelo utilizador")
+        note = "Conferido manualmente pelo utilizador"
+        if invoice and created_payment:
+            note += f"; pagamento registado na factura {invoice.number}"
+        elif invoice:
+            note += f"; pagamento já existente para a factura {invoice.number}, sem duplicação"
+        doc.reconciliation_notes = ((doc.reconciliation_notes or "") + ("; " if doc.reconciliation_notes else "") + note)
         db.session.commit()
-        flash(f"Documento {doc.document_number or doc.id} marcado como conferido.")
+        if invoice and created_payment:
+            flash(f"Documento {doc.document_number or doc.id} confirmado. Factura {invoice.number} actualizada e pagamento de Kz {money(doc.amount):,.2f} registado.")
+        elif invoice:
+            flash(f"Documento {doc.document_number or doc.id} confirmado. A factura {invoice.number} foi actualizada sem duplicar o pagamento.")
+        else:
+            flash(f"Documento {doc.document_number or doc.id} marcado como conferido. Associe uma factura para actualizar o pagamento.")
     except Exception as e:
         db.session.rollback(); flash("Erro ao confirmar Documento Fonte: " + str(e))
     return redirect(url_for("supplier_payments"))
