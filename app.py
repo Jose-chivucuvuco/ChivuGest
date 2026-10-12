@@ -484,7 +484,7 @@ def normalize_key(k):
         "documento":"numero", "doc":"numero",
         "fornecedor":"fornecedor", "supplier":"fornecedor", "nome_fornecedor":"fornecedor", "emitente":"fornecedor", "beneficiario":"fornecedor", "beneficiario_do_pagamento":"fornecedor",
         "nuit":"nif", "vat_number":"nif", "tax_id":"nif", "tin":"nif",
-        "data_emissao":"data", "issue_date":"data", "invoice_date":"data", "data_fatura":"data", "data_os":"data", "data_emissao_os":"data_os", "data_confirmacao_pagamento":"data_confirmacao_pagamento", "data_pagamento":"data_confirmacao_pagamento",
+        "data_emissao":"data", "issue_date":"data", "invoice_date":"data", "data_fatura":"data", "data_os":"data", "data_emissao_os":"data_os", "data_confirmacao_pagamento":"data_confirmacao_pagamento", "data_da_confirmacao_de_pagamento":"data_confirmacao_pagamento", "data_de_confirmacao_de_pagamento":"data_confirmacao_pagamento", "data_pagamento":"data_confirmacao_pagamento",
         "due_date":"vencimento", "data_vencimento":"vencimento", "data_limite":"vencimento",
         "valor_total":"total", "total_fatura":"total", "valor":"total", "valor_os":"total", "valor_total_mn":"valor_total_mn", "valor_os_mn":"valor_os_mn", "valor_da_os_mn":"valor_os_mn", "valor_total_me":"valor_total_me", "valor_os_me":"valor_os_me",
         "montante":"total", "amount":"total", "grand_total":"total",
@@ -929,7 +929,7 @@ def uploaded_rows(f):
             rows_iter = ws.iter_rows(min_row=1, max_row=max_rows + 30, max_col=max_cols, values_only=True)
             preview = []
             header_idx = None
-            known = {"fornecedor", "beneficiario", "nif", "ordem_de_saque", "ordem_saque", "numero_os", "n_os", "no_os", "fatura", "numero", "data", "data_emissao_os", "data_confirmacao_pagamento", "total", "valor", "valor_total_mn", "valor_os_mn", "situacao", "situacao_os", "estado", "finalidade_os", "finalidade_da_os", "tipo_do_contribuinte", "categoria", "natureza", "tipo_os"}
+            known = {"fornecedor", "beneficiario", "nif", "ordem_de_saque", "ordem_saque", "numero_os", "n_os", "no_os", "fatura", "numero", "data", "data_emissao_os", "data_confirmacao_pagamento", "data_da_confirmacao_de_pagamento", "total", "valor", "valor_total_mn", "valor_os_mn", "situacao", "situacao_os", "estado", "finalidade_os", "finalidade_da_os", "tipo_do_contribuinte", "categoria", "natureza", "tipo_os"}
             for idx, row in enumerate(rows_iter, start=1):
                 vals = list(row)
                 norm = [normalize_key(v) for v in vals]
@@ -2091,9 +2091,17 @@ def import_payment_documents():
 
             source_rows=[]
             payment_rows=[]
+            docfonte_payment_rows=[]
             seen_hashes=set(existing_hashes)
             pending_suppliers=[]
             pending_supplier_keys=set()
+            existing_payment_keys = {
+                (supplier_id, str(receipt or "").strip())
+                for supplier_id, receipt in SupplierPayment.query.with_entities(SupplierPayment.supplier_id, SupplierPayment.receipt).all()
+                if receipt
+            }
+            pending_payment_keys=set()
+            invoice_paid_additions={}
 
             def resolve_or_queue_supplier(name, nif):
                 key_nif=str(nif or "").strip()
@@ -2121,9 +2129,8 @@ def import_payment_documents():
                 return supplier
 
             def flush_batch():
-                nonlocal source_rows, payment_rows, created, pending_suppliers
+                nonlocal source_rows, payment_rows, docfonte_payment_rows, created, pending_suppliers, invoice_paid_additions
                 if pending_suppliers:
-                    # Um único flush atribui os IDs dos novos fornecedores.
                     db.session.flush()
                     for key, obj in pending_suppliers:
                         if obj.nif:
@@ -2136,10 +2143,20 @@ def import_payment_documents():
                     db.session.bulk_insert_mappings(SourceDocument, source_rows)
                 if payment_rows:
                     db.session.bulk_insert_mappings(PaymentOrder, payment_rows)
-                if source_rows or payment_rows:
+                if docfonte_payment_rows:
+                    db.session.bulk_insert_mappings(SupplierPayment, docfonte_payment_rows)
+                if invoice_paid_additions:
+                    for inv_id, addition in invoice_paid_additions.items():
+                        inv_obj = next((x for x in invoice_pool if x.id == inv_id), None)
+                        if inv_obj is not None:
+                            inv_obj.paid = money(inv_obj.paid) + money(addition)
+                            inv_obj.status = "Paga" if money(inv_obj.paid) >= money(inv_obj.total) else ("Parcial" if money(inv_obj.paid) > 0 else "Pendente")
+                if source_rows or payment_rows or docfonte_payment_rows or invoice_paid_additions:
                     db.session.commit()
                 source_rows=[]
                 payment_rows=[]
+                docfonte_payment_rows=[]
+                invoice_paid_additions={}
 
             excluded_non_company = 0
             for r in rows:
@@ -2167,19 +2184,26 @@ def import_payment_documents():
                         r"(?:n\s*[.ºo°]+|n[ºo°]|no|número|numero)\s*[:#-]?\s*([A-Z0-9][A-Z0-9./_-]{2,})"
                     ])
 
-                date_value = row_value(r,"data_emissao_os","data_os","data")
-                if date_value in (None, ""):
-                    date_value = row_value(r,"data_confirmacao_pagamento","data_pagamento")
-
-                amount_value = row_value(r,"valor_total_mn","valor_os_mn","valor","valor_os","montante","amount","total")
+                # DocFonte: a data efectiva é a Data da Confirmação de Pagamento;
+                # nunca substituir pela data de emissão da Ordem de Saque.
+                if source_type_key == "docfonte":
+                    date_value = row_value(r, "data_da_confirmacao_de_pagamento", "data_de_confirmacao_de_pagamento", "data_confirmacao_pagamento", "data_pagamento")
+                    amount_value = row_value(r, "valor_total_mn")
+                    os_value = row_value(r,"n_os","numero_os","ordem_saque","ordem_de_saque","os","no_os","ordem","numero_ordem")
+                    status_value = row_value(r,"situacao_os","situacao","status","estado")
+                else:
+                    date_value = row_value(r,"data_emissao_os","data_os","data","data_da_confirmacao_de_pagamento","data_confirmacao_pagamento","data_pagamento")
+                    amount_value = row_value(r,"valor_total_mn","valor_os_mn","valor","valor_os","montante","amount","total")
+                    os_value = row_value(r,"ordem_saque","ordem_de_saque","os","numero_os","n_os","no_os","ordem","numero_ordem")
+                    status_value = row_value(r,"situacao","situacao_os","status","estado")
                 parsed={
-                    "os_number": str(row_value(r,"ordem_saque","ordem_de_saque","os","numero_os","n_os","no_os","ordem","numero_ordem") or "").strip(),
+                    "os_number": str(os_value or "").strip(),
                     "supplier": beneficiary_name,
                     "nif": nif,
                     "invoice_number": invoice_number,
                     "date": date_value,
                     "amount": num(amount_value),
-                    "status": str(row_value(r,"situacao","situacao_os","status","estado") or "Pendente").strip(),
+                    "status": str(status_value or "Pendente").strip(),
                     "bank_reference": str(row_value(r,"numero_bancario","referencia_bancaria","referencia_banco","bank_reference","referencia") or "").strip(),
                     "finalidade": finalidade,
                     "contract_number": str(row_value(r,"numero_contrato","contrato","contract") or "").strip(),
@@ -2244,8 +2268,34 @@ def import_payment_documents():
                     "reconciliation_status":recon_status,
                     "reconciliation_notes":recon_notes
                 })
-                # DocFonte não cria PaymentOrder; mantém apenas o documento-fonte.
-                if source_type_key != "docfonte":
+                # DocFonte mantém o registo de origem, mas só gera pagamento real
+                # se a OS estiver Paga e houver data de confirmação.
+                if source_type_key == "docfonte":
+                    normalized_status = normalize_os_status(parsed["status"])
+                    payment_key = (supplier_id, parsed["os_number"])
+                    if normalized_status == "Paga" and parsed["date_parsed"] is not None:
+                        if payment_key not in existing_payment_keys and payment_key not in pending_payment_keys:
+                            docfonte_payment_rows.append({
+                                "receipt": parsed["os_number"],
+                                "supplier_id": supplier_id,
+                                "invoice_id": invoice.id if invoice else None,
+                                "contract_id": contract.id if contract else None,
+                                "framework_agreement_id": framework_id,
+                                "date": parsed["date_parsed"],
+                                "method": "DocFonte",
+                                "amount": parsed["amount"],
+                                "reference": parsed["os_number"],
+                                "notes": "Pagamento confirmado via DocFonte. Finalidade da OS usada apenas para cruzamento da factura."
+                            })
+                            pending_payment_keys.add(payment_key)
+                            existing_payment_keys.add(payment_key)
+                            if invoice is not None:
+                                invoice_paid_additions[invoice.id] = money(invoice_paid_additions.get(invoice.id, 0)) + money(parsed["amount"])
+                    elif normalized_status == "Paga" and parsed["date_parsed"] is None:
+                        recon_notes = ((recon_notes or "") + "; " if recon_notes else "") + "Situação OS=Paga, mas sem Data da Confirmação de Pagamento: pagamento não lançado automaticamente."
+                        if source_rows:
+                            source_rows[-1]["reconciliation_notes"] = recon_notes
+                else:
                     payment_rows.append({
                         "os_number":parsed["os_number"],
                         "supplier_id":supplier_id,
@@ -2288,7 +2338,7 @@ def import_payment_documents():
                 db.session.add(osr)
             created=1; db.session.commit()
         if source_type_key == "docfonte":
-            flash(f"DocFonte importado como documento-fonte: {created} registo(s). Nenhuma Ordem de Saque foi criada. {legacy_docfonte_orders_removed} OS legada(s) do DocFonte foram removida(s). {excluded_non_company} registo(s) de salários, pessoal e subsídios de deslocação foram excluídos automaticamente.")
+            flash(f"DocFonte importado: {created} registo(s) de origem preservado(s). Só OS com Situação=Paga e Data da Confirmação de Pagamento geram pagamento, sem duplicar a mesma OS por fornecedor. {legacy_docfonte_orders_removed} OS legada(s) de DocFonte foram removidas. {excluded_non_company} registo(s) de salários/pessoal/subsídios foram excluídos.")
         else:
             flash(f"Importação concluída: {created} documento(s)/ordem(ns) de saque de empresas. {excluded_non_company} registo(s) de salários, pessoal e subsídios de deslocação foram excluídos automaticamente.")
     except Exception as e:
