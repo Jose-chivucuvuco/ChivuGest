@@ -2251,7 +2251,7 @@ def import_payment_documents():
                 if not supplier_id:
                     raise ValueError(f"Não foi possível identificar/criar o fornecedor para a OS {parsed.get('os_number') or 'sem número'}.")
                 framework_id=(contract.framework_agreement_id if contract else (invoice.framework_agreement_id if invoice else None))
-                extracted=json.dumps(parsed,ensure_ascii=False)
+                extracted=json.dumps(parsed,ensure_ascii=False,default=str)
                 source_rows.append({
                     "document_type":source_type,
                     "document_number":parsed["os_number"],
@@ -2331,10 +2331,10 @@ def import_payment_documents():
                 if not supplier:
                     supplier=Supplier(name=sname,nif=parsed.get("nif") or None,contracting_type="Outro / Regime especial")
                     db.session.add(supplier); db.session.flush()
-            doc=SourceDocument(document_type=source_type,document_number=parsed.get("os_number") or parsed.get("invoice_number") or None,supplier_id=supplier.id,source_filename=parsed["filename"],source_hash=parsed["hash"],issue_date=parsed.get("date_parsed"),amount=parsed.get("amount",0),extracted_data=json.dumps(parsed,ensure_ascii=False),import_confidence=parsed.get("confidence",0))
+            doc=SourceDocument(document_type=source_type,document_number=parsed.get("os_number") or parsed.get("invoice_number") or None,supplier_id=supplier.id,source_filename=parsed["filename"],source_hash=parsed["hash"],issue_date=parsed.get("date_parsed"),amount=parsed.get("amount",0),extracted_data=json.dumps(parsed,ensure_ascii=False,default=str),import_confidence=parsed.get("confidence",0))
             db.session.add(doc)
             if source_type_key != "docfonte":
-                osr=PaymentOrder(os_number=parsed.get("os_number") or parsed.get("invoice_number") or "SEM-NUMERO",supplier_id=supplier.id,invoice_id=invoice.id if invoice else None,contract_id=contract.id if contract else None,framework_agreement_id=(contract.framework_agreement_id if contract else (invoice.framework_agreement_id if invoice else None)),issue_date=parsed.get("date_parsed"),amount=parsed.get("amount",0),status=normalize_os_status(parsed.get("status")),bank_reference=parsed.get("bank_reference"),source_type=source_type,source_filename=parsed["filename"],source_hash=parsed["hash"],extracted_data=json.dumps(parsed,ensure_ascii=False),reconciliation_status=recon_status,reconciliation_notes=recon_notes)
+                osr=PaymentOrder(os_number=parsed.get("os_number") or parsed.get("invoice_number") or "SEM-NUMERO",supplier_id=supplier.id,invoice_id=invoice.id if invoice else None,contract_id=contract.id if contract else None,framework_agreement_id=(contract.framework_agreement_id if contract else (invoice.framework_agreement_id if invoice else None)),issue_date=parsed.get("date_parsed"),amount=parsed.get("amount",0),status=normalize_os_status(parsed.get("status")),bank_reference=parsed.get("bank_reference"),source_type=source_type,source_filename=parsed["filename"],source_hash=parsed["hash"],extracted_data=json.dumps(parsed,ensure_ascii=False,default=str),reconciliation_status=recon_status,reconciliation_notes=recon_notes)
                 db.session.add(osr)
             created=1; db.session.commit()
         if source_type_key == "docfonte":
@@ -2841,7 +2841,7 @@ def report_document_upload():
     try:
         if SourceDocument.query.filter_by(source_hash=digest).first(): raise ValueError("Este PDF já foi importado.")
         parsed=extract_pdf_or_image(FileStorage(stream=io.BytesIO(raw), filename=f.filename, content_type=f.mimetype or "application/pdf"))
-        doc=SourceDocument(document_type=document_type,document_number=parsed.get("number"),supplier_id=supplier_id,source_filename=f.filename,source_hash=digest,issue_date=parse_date(parsed.get("date"),None),amount=num(parsed.get("total")),extracted_data=json.dumps(parsed,ensure_ascii=False),import_confidence=int(parsed.get("confidence",0)),content=raw)
+        doc=SourceDocument(document_type=document_type,document_number=parsed.get("number"),supplier_id=supplier_id,source_filename=f.filename,source_hash=digest,issue_date=parse_date(parsed.get("date"),None),amount=num(parsed.get("total")),extracted_data=json.dumps(parsed,ensure_ascii=False,default=str),import_confidence=int(parsed.get("confidence",0)),content=raw)
         inv_id=request.form.get("invoice_id",type=int)
         if inv_id:
             inv=db.session.get(SupplierInvoice,inv_id)
@@ -3008,7 +3008,7 @@ def import_center():
                 for r in rows:
                     parsed={"number":str(row_value(r,"numero","fatura","factura","invoice_number")).strip(),"supplier":str(row_value(r,"fornecedor","supplier","emitente")).strip(),"nif":str(row_value(r,"nif","nuit" )).strip(),"date":str(row_value(r,"data","issue_date") or "").strip(),"due_date":str(row_value(r,"vencimento","due_date") or "").strip(),"subtotal":num(row_value(r,"subtotal")),"vat":num(row_value(r,"iva","vat")),"total":num(row_value(r,"total","valor","amount")),"currency":str(row_value(r,"currency","moeda")) or "AOA","framework_agreement":str(row_value(r,"acordo_quadro","acordo-quadro","framework_agreement","aq") or "").strip(),"contract":str(row_value(r,"contrato","contract") or "").strip(),"os_number":str(row_value(r,"ordem_saque","ordem_de_saque","os","numero_os","n_os") or "").strip(),"payment_method":str(row_value(r,"metodo","meio_pagamento","payment_method") or "").strip(),"reference":str(row_value(r,"referencia","reference") or "").strip()}
                     if not parsed["total"] and parsed["subtotal"]: parsed["total"]=parsed["subtotal"]+parsed["vat"]
-                    parsed["hash"]=hashlib.sha256(json.dumps(parsed,sort_keys=True,ensure_ascii=False).encode()).hexdigest(); parsed["confidence"]=60
+                    parsed["hash"]=hashlib.sha256(json.dumps(parsed,sort_keys=True,ensure_ascii=False,default=str).encode()).hexdigest(); parsed["confidence"]=60
                     a=analyze_invoice_import(parsed)
                     if a["duplicate"]: dup+=1; continue
                     if a["issues"]: review+=1; errors.append({"row":r,"issues":a["issues"]}); continue
@@ -3058,7 +3058,7 @@ def invoice_confirm():
         if contract and contract.supplier_id!=s.id: raise ValueError("O contrato seleccionado não pertence ao fornecedor.")
         if contract and framework and contract.framework_agreement_id!=framework.id: raise ValueError("Contrato e Acordo-Quadro não correspondem.")
         if SupplierInvoice.query.filter(SupplierInvoice.supplier_id==s.id).all() and any(_invoice_number_matches(number,i.number) for i in SupplierInvoice.query.filter_by(supplier_id=s.id).all()): raise ValueError("Já existe uma fatura com este número para o fornecedor.")
-        inv=SupplierInvoice(number=number,supplier_id=s.id,contract_id=contract.id if contract else None,framework_agreement_id=framework.id if framework else None,issue_date=parse_date(request.form.get("date")),due_date=parse_date(request.form.get("due_date"),None),subtotal=subtotal,vat=vat,total=total,paid=0,currency=request.form.get("currency") or "AOA",source_filename=data.get("filename"),source_hash=data.get("hash"),raw_text=data.get("text","")[:120000],extracted_data=json.dumps(data,ensure_ascii=False),import_confidence=int(data.get("confidence",0)))
+        inv=SupplierInvoice(number=number,supplier_id=s.id,contract_id=contract.id if contract else None,framework_agreement_id=framework.id if framework else None,issue_date=parse_date(request.form.get("date")),due_date=parse_date(request.form.get("due_date"),None),subtotal=subtotal,vat=vat,total=total,paid=0,currency=request.form.get("currency") or "AOA",source_filename=data.get("filename"),source_hash=data.get("hash"),raw_text=data.get("text","")[:120000],extracted_data=json.dumps(data,ensure_ascii=False,default=str),import_confidence=int(data.get("confidence",0)))
         inv.status="Pendente"
         db.session.add(inv); db.session.flush()
 
