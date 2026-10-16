@@ -2018,6 +2018,50 @@ def supplier_payments():
     source_documents=SourceDocument.query.order_by(SourceDocument.id.desc()).limit(200).all()
     return render_template("supplier_payments.html", rows=SupplierPayment.query.order_by(SupplierPayment.id.desc()).all(), orders=orders, source_documents=source_documents, suppliers=suppliers_list, invoices=invoices, contracts=contracts, framework_agreements=framework_agreements)
 
+def _parse_order_book_pdf_rows(raw_bytes):
+    """Read SIGFE Livro de Ordem de Saque PDF rows; wrapped Finalidade lines attach to prior row."""
+    try:
+        import fitz
+        doc = fitz.open(stream=raw_bytes, filetype="pdf")
+        lines=[" ".join(x.split()) for page in doc for x in page.get_text("text").splitlines()]
+    except Exception as exc:
+        raise ValueError(f"Não foi possível ler o PDF do Livro de OS: {exc}")
+    rows=[]; i=0; current=None
+    status_re=re.compile(r"^(Paga|Cancelada|Pendente|Anulada|Liquidada|Emitida)$",re.I)
+    account_re=re.compile(r"^[A-Z]{2}\d{2}(?:[. ]?\d+)+$",re.I)
+    amount_re=re.compile(r"^[\d.]+,\d{2}$")
+    while i < len(lines):
+        line=lines[i]
+        if line.upper()=="OS" and i+5 < len(lines):
+            # Extracted PDF text often separates each table cell onto its own line.
+            num=lines[i+1] if i+1<len(lines) else ""
+            status=lines[i+2] if i+2<len(lines) else ""
+            date=lines[i+3] if i+3<len(lines) else ""
+            beneficiary=lines[i+4] if i+4<len(lines) else ""
+            account=lines[i+5] if i+5<len(lines) else ""
+            if num.isdigit() and status_re.match(status) and re.match(r"^\d{2}/\d{2}/\d{4}$",date) and account_re.match(account):
+                if current: rows.append(current)
+                amount=""; j=i+6
+                while j<len(lines) and not amount_re.match(lines[j]):
+                    if lines[j].upper()=="OS": break
+                    j+=1
+                if j<len(lines) and amount_re.match(lines[j]):
+                    amount=lines[j]; j+=1
+                    purpose=[]
+                    while j<len(lines) and lines[j].upper()!="OS":
+                        if re.match(r"^(Totais|Fonte:|Utilizador:|Exercício:|Emissão:|Página:|REPÚBLICA|MINISTÉRIO|Unidade Orçamental|Órgão Dependente|Livro de Ordem de Saque)",lines[j],re.I):
+                            break
+                        purpose.append(lines[j])
+                        j+=1
+                    current={"Nº Doc":num,"Situação":status,"Data":date,"Beneficiário":beneficiary,"Valor":amount,"Finalidade":" ".join(purpose).strip()}
+                    i=j; continue
+        i+=1
+    if current: rows.append(current)
+    if not rows:
+        raise ValueError("Não foram reconhecidas linhas de OS no PDF. Se for digitalizado, confirme a qualidade do OCR; CSV/XLSX é preferível.")
+    return rows
+
+
 @app.route("/payments/import-documents", methods=["POST"])
 @login_required
 def import_payment_documents():
@@ -2037,7 +2081,8 @@ def import_payment_documents():
                 func.lower(PaymentOrder.source_type) == "docfonte"
             ).delete(synchronize_session=False)
             db.session.commit()
-        if filename.endswith((".csv", ".xlsx")):
+        is_order_book = source_type_key in {"livro de ordens de saque", "livro de ordem de saque", "livro os", "livro de os"}
+        if filename.endswith((".csv", ".xlsx")) or (is_order_book and filename.endswith(".pdf")):
             # Read the upload once. Reusing the bytes avoids repeated getvalue()/stream
             # operations for every row and keeps large DocFonte imports predictable.
             raw_upload = f.read()
@@ -2048,7 +2093,10 @@ def import_payment_documents():
             # binary stream instead; this is also compatible with CSV handling.
             upload_stream = io.BytesIO(raw_upload)
             upload_stream.filename = f.filename
-            rows=uploaded_rows(upload_stream)
+            if is_order_book and filename.endswith(".pdf"):
+                rows=_parse_order_book_pdf_rows(raw_upload)
+            else:
+                rows=uploaded_rows(upload_stream)
             if not rows:
                 raise ValueError("O ficheiro não contém linhas de dados reconhecíveis.")
             if len(rows) >= int(os.environ.get("CHIVUGEST_IMPORT_MAX_ROWS", "5000")):
@@ -2159,6 +2207,7 @@ def import_payment_documents():
                 invoice_paid_additions={}
 
             excluded_non_company = 0
+            seen_book_order_keys=set()
             for r in rows:
                 # This ChivuGest import is for enterprise/supplier data only.
                 # Payroll, salaries and travel allowances must never become
@@ -2191,6 +2240,13 @@ def import_payment_documents():
                     amount_value = row_value(r, "valor_total_mn")
                     os_value = row_value(r,"n_os","numero_os","ordem_saque","ordem_de_saque","os","no_os","ordem","numero_ordem")
                     status_value = row_value(r,"situacao_os","situacao","status","estado")
+                elif is_order_book:
+                    # In the SIGFE Livro de OS, Nº Doc is the OS identifier.
+                    # Finalidade is only an auxiliary source for invoice reconciliation.
+                    date_value = row_value(r,"data","data_os","data_emissao_os")
+                    amount_value = row_value(r,"valor","valor_os","valor_os_mn","valor_total_mn","montante","amount","total")
+                    os_value = row_value(r,"n_doc","numero_doc","no_doc","num_doc","numero_documento","documento","ordem_saque","ordem_de_saque","os","numero_os","n_os","no_os","ordem","numero_ordem")
+                    status_value = row_value(r,"situacao","situacao_os","status","estado")
                 else:
                     date_value = row_value(r,"data_emissao_os","data_os","data","data_da_confirmacao_de_pagamento","data_confirmacao_pagamento","data_pagamento")
                     amount_value = row_value(r,"valor_total_mn","valor_os_mn","valor","valor_os","montante","amount","total")
@@ -2214,6 +2270,16 @@ def import_payment_documents():
                 parsed["confidence"]=min(100, sum(bool(parsed.get(k)) for k in ("os_number","supplier","invoice_number","date","amount"))*20 + (10 if parsed.get("nif") else 0))
                 if not parsed["os_number"]:
                     continue
+                if is_order_book:
+                    # Avoid re-importing an OS already present for the same supplier,
+                    # including repeated rows inside the same upload batch.
+                    book_key=(_normalize_match_text(parsed.get("supplier")), str(parsed["os_number"]).strip())
+                    if book_key in seen_book_order_keys:
+                        continue
+                    seen_book_order_keys.add(book_key)
+                    existing_os = PaymentOrder.query.filter_by(os_number=parsed["os_number"]).all()
+                    if existing_os and any((x.supplier and _normalize_match_text(x.supplier.name) == book_key[0]) for x in existing_os):
+                        continue
 
                 parsed["hash"]=hashlib.sha256((upload_hash+json.dumps(parsed,sort_keys=True,default=str)).encode()).hexdigest()
                 if parsed["hash"] in seen_hashes:
@@ -3402,6 +3468,41 @@ def admin_delete_suppliers_bulk():
         db.session.rollback()
         flash("Erro ao eliminar fornecedores em lote: " + str(e))
     return redirect(url_for("suppliers"))
+
+@app.route("/admin/delete/supplier-payments-bulk", methods=["POST"])
+@login_required
+@admin_required
+def admin_delete_supplier_payments_bulk():
+    raw_ids = request.form.getlist("payment_ids")
+    ids = sorted({int(x) for x in raw_ids if str(x).isdigit()})
+    if not ids:
+        flash("Selecione pelo menos um pagamento.")
+        return redirect(url_for("supplier_payments"))
+    deleted = 0
+    skipped = 0
+    try:
+        for payment_id in ids:
+            payment = db.session.get(SupplierPayment, payment_id)
+            if payment is None:
+                continue
+            try:
+                with db.session.begin_nested():
+                    db.session.delete(payment)
+                    db.session.flush()
+                deleted += 1
+            except IntegrityError:
+                skipped += 1
+        db.session.commit()
+        audit("BULK_DELETE", "SupplierPayment", None,
+              f"Pagamentos eliminados em lote: {deleted}; seleccionados: {len(ids)}; ignorados por dependências: {skipped}")
+        message = f"{deleted} pagamento(s) eliminado(s)."
+        if skipped:
+            message += f" {skipped} não foi/foram eliminado(s) por existirem registos relacionados."
+        flash(message)
+    except Exception as e:
+        db.session.rollback()
+        flash("Erro ao eliminar pagamentos seleccionados: " + str(e))
+    return redirect(url_for("supplier_payments"))
 
 @app.route("/admin/delete/<model>/<int:record_id>", methods=["POST"])
 @login_required
