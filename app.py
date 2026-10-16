@@ -3870,6 +3870,57 @@ def system_institutions():
     return render_template("system_institutions.html", rows=rows)
 
 
+@app.route("/system/institutions/<int:institution_id>/edit", methods=["GET", "POST"])
+@login_required
+@system_admin_required
+def system_edit_institution(institution_id):
+    """Edit the institution's display and contact details from platform administration."""
+    inst = db.session.get(Institution, institution_id)
+    if not inst:
+        flash("Instituição não encontrada.")
+        return redirect(url_for("system_institutions"))
+    profile = InstitutionProfile.query.execution_options(skip_tenant_scope=True).filter_by(institution_id=inst.id).first()
+    if not profile:
+        profile = InstitutionProfile(institution_id=inst.id, institution_name=inst.name, nif=inst.nif or "")
+        db.session.add(profile)
+        db.session.flush()
+    if request.method == "POST":
+        name = (request.form.get("institution_name") or "").strip()
+        if not name:
+            flash("O nome oficial da instituição é obrigatório.")
+            return render_template("system_institution_edit.html", inst=inst, profile=profile)
+        duplicate = Institution.query.filter(Institution.name == name, Institution.id != inst.id).first()
+        if duplicate:
+            flash("Já existe outra instituição com esse nome.")
+            return render_template("system_institution_edit.html", inst=inst, profile=profile)
+        inst.name = name
+        inst.nif = (request.form.get("institution_nif") or "").strip()
+        profile.institution_name = name
+        profile.nif = inst.nif
+        profile.ministry = (request.form.get("ministry") or "").strip()
+        profile.address = (request.form.get("institution_address") or "").strip()
+        profile.phone = (request.form.get("institution_phone") or "").strip()
+        profile.email = (request.form.get("institution_email") or "").strip()
+        logo = request.files.get("institution_logo")
+        if logo and logo.filename:
+            filename = secure_filename(logo.filename)
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in {".png", ".jpg", ".jpeg"}:
+                db.session.rollback()
+                flash("O logótipo deve estar em formato PNG ou JPG.")
+                return redirect(url_for("system_edit_institution", institution_id=inst.id))
+            upload_dir = os.path.join(app.root_path, "static", "uploads")
+            os.makedirs(upload_dir, exist_ok=True)
+            safe_name = f"institution_{inst.id}_logo" + ext
+            logo.save(os.path.join(upload_dir, safe_name))
+            profile.logo_filename = safe_name
+        db.session.commit()
+        audit("UPDATE", "Institution", inst.id, "Identificação institucional alterada pelo Administrador do Sistema")
+        flash("Identificação institucional atualizada.")
+        return redirect(url_for("system_institutions"))
+    return render_template("system_institution_edit.html", inst=inst, profile=profile)
+
+
 @app.route("/system/institutions/<int:institution_id>/toggle", methods=["POST"])
 @login_required
 @system_admin_required
@@ -3954,12 +4005,56 @@ def reset_password(uid):
             return redirect(url_for("users"))
     return render_template("reset_password.html", user=user)
 
-@app.route("/users/toggle/<int:uid>")
+@app.route("/users/toggle/<int:uid>", methods=["POST"])
 @login_required
 @admin_required
 def toggle_user(uid):
-    u=db.session.get(User,uid)
-    if u and u.id != session["uid"]: u.active=not u.active; db.session.commit()
+    u = db.session.get(User, uid)
+    if not u:
+        flash("Utilizador não encontrado nesta instituição.")
+    elif u.id == session.get("uid"):
+        flash("Não pode desativar a própria conta.")
+    elif u.role == "system_admin":
+        flash("O Administrador do Sistema não pode ser alterado pelo Gestor institucional.")
+    elif u.role == "institution_admin" and session.get("role") != "system_admin":
+        flash("A gestão de outros Gestores institucionais está reservada ao Administrador do Sistema.")
+    else:
+        u.active = not u.active
+        db.session.commit()
+        audit("USER_TOGGLE", "User", u.id, "Estado do utilizador alterado")
+        flash("Estado do utilizador atualizado.")
+    return redirect(url_for("users"))
+
+
+@app.route("/users/delete/<int:uid>", methods=["POST"])
+@login_required
+@admin_required
+def delete_user(uid):
+    u = db.session.get(User, uid)
+    if not u:
+        flash("Utilizador não encontrado nesta instituição.")
+        return redirect(url_for("users"))
+    if u.id == session.get("uid"):
+        flash("Não pode eliminar a própria conta.")
+        return redirect(url_for("users"))
+    if u.role == "system_admin":
+        flash("O Gestor institucional não pode eliminar o Administrador do Sistema.")
+        return redirect(url_for("users"))
+    if u.role == "institution_admin" and session.get("role") != "system_admin":
+        flash("A eliminação de outro Gestor institucional está reservada ao Administrador do Sistema.")
+        return redirect(url_for("users"))
+    try:
+        user_id, username = u.id, u.username
+        db.session.delete(u)
+        db.session.commit()
+        audit("USER_DELETE", "User", user_id, f"Utilizador {username} eliminado pelo administrador autorizado")
+        flash("Utilizador eliminado com sucesso.")
+    except IntegrityError:
+        db.session.rollback()
+        flash("Este utilizador tem registos relacionados. Por segurança, utilize Ativar/Desativar para retirar o acesso, ou peça ao administrador do sistema uma eliminação auditada.")
+    except Exception:
+        db.session.rollback()
+        flash("Não foi possível eliminar o utilizador. Consulte os registos de auditoria.")
     return redirect(url_for("users"))
 
 # -----------------------------------------------------------------------------
