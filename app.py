@@ -4022,9 +4022,9 @@ def ensure_schema():
         names = {c["name"] for c in inspect(db.engine).get_columns(table)}
         if "institution_id" not in names:
             with db.engine.begin() as conn:
-                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN institution_id INTEGER"))
+                conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN institution_id INTEGER'))
         with db.engine.begin() as conn:
-            conn.execute(text(f"UPDATE {table} SET institution_id=:iid WHERE institution_id IS NULL"), {"iid": default_inst.id})
+            conn.execute(text(f'UPDATE "{table}" SET institution_id=:iid WHERE institution_id IS NULL'), {"iid": default_inst.id})
     # PostgreSQL: replace legacy global business-code uniqueness with tenant-level
     # uniqueness so two institutions can use their own numbering conventions.
     if db.engine.dialect.name == "postgresql":
@@ -4047,8 +4047,8 @@ def ensure_schema():
     # provisioned separately using environment variables, never a default password.
     with db.engine.begin() as conn:
         if "user" in inspect(db.engine).get_table_names():
-            conn.execute(text("UPDATE user SET role='institution_admin' WHERE role IN ('admin','gestor')"))
-            conn.execute(text("UPDATE user SET role='technician' WHERE role='user' OR role IS NULL OR role=''"))
+            conn.execute(text("UPDATE \"user\" SET role='institution_admin' WHERE role IN ('admin','gestor')"))
+            conn.execute(text("UPDATE \"user\" SET role='technician' WHERE role='user' OR role IS NULL OR role=''"))
     if "framework_agreement" not in tables:
         FrameworkAgreement.__table__.create(bind=db.engine, checkfirst=True)
     if "framework_supplier" not in tables:
@@ -4058,7 +4058,7 @@ def ensure_schema():
         names={c["name"] for c in inspect(db.engine).get_columns(table)}
         if column not in names:
             with db.engine.begin() as conn:
-                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+                conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {ddl}'))
     add_column("procurement_procedure", "instrument_type", "VARCHAR(100)")
     add_column("procurement_procedure", "framework_agreement_id", "INTEGER")
     add_column("contract", "instrument_type", "VARCHAR(100)")
