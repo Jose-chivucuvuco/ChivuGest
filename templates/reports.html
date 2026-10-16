@@ -50,7 +50,7 @@
     {% for r in supplier_rows %}
       <tr>
         <td><b>{{r.obj.name}}</b></td><td>{{r.obj.nif or '—'}}</td><td>Kz {{"{:,.2f}".format(r.invoiced)}}</td><td>Kz {{"{:,.2f}".format(r.paid)}}</td><td><b>Kz {{"{:,.2f}".format(r.payable)}}</b></td><td>{{r.invoice_count}}</td><td>{% if r.alert_count %}<span class="badge redbg">{{r.alert_count}}</span>{% else %}<span class="badge green">0</span>{% endif %}</td><td>{{r.document_count}}</td><td>{{r.os_count}}</td>
-        <td class="actions"><a class="btn small" href="{{ url_for('supplier_report_pdf', supplier_id=r.obj.id, status=status, framework_id=framework_id or '', contract_id=contract_id or '', start_date=start_date, end_date=end_date) }}">📄 PDF</a><a class="btn small secondary" href="{{ url_for('reports', supplier_id=r.obj.id) }}">Ver</a></td>
+        <td class="actions"><a class="btn small secondary" target="_blank" href="{{ url_for('supplier_report_pdf', supplier_id=r.obj.id, preview=1, status=status, framework_id=framework_id or '', contract_id=contract_id or '', start_date=start_date, end_date=end_date) }}">👁 Visualizar</a><a class="btn small" href="{{ url_for('supplier_report_pdf', supplier_id=r.obj.id, status=status, framework_id=framework_id or '', contract_id=contract_id or '', start_date=start_date, end_date=end_date) }}">📄 Descarregar PDF</a><a class="btn small secondary" href="{{ url_for('reports', supplier_id=r.obj.id) }}">Ver</a></td>
       </tr>
     {% else %}<tr><td colspan="10" class="empty">Nenhum fornecedor encontrado.</td></tr>{% endfor %}
     </tbody>

@@ -6,6 +6,7 @@ from flask import Flask, render_template, request, redirect, url_for, session, f
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.datastructures import FileStorage
+from werkzeug.utils import secure_filename
 from sqlalchemy import func, inspect, text, or_, and_
 from sqlalchemy.exc import IntegrityError
 
@@ -28,7 +29,7 @@ try:
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import mm
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, Image as RLImage
     REPORTLAB_AVAILABLE = True
 except ImportError:
     REPORTLAB_AVAILABLE = False
@@ -59,6 +60,18 @@ class User(db.Model):
     role = db.Column(db.String(30), nullable=False, default="user")
     active = db.Column(db.Boolean, nullable=False, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class InstitutionProfile(db.Model):
+    __tablename__ = "institution_profile"
+    id = db.Column(db.Integer, primary_key=True, default=1)
+    institution_name = db.Column(db.String(220), nullable=False, default="Instituição utilizadora do ChivuGest")
+    ministry = db.Column(db.String(220), default="")
+    nif = db.Column(db.String(40), default="")
+    address = db.Column(db.String(300), default="")
+    phone = db.Column(db.String(80), default="")
+    email = db.Column(db.String(180), default="")
+    logo_filename = db.Column(db.String(255), default="")
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class Client(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -409,16 +422,40 @@ def login_required(f):
 def admin_required(f):
     @wraps(f)
     def w(*a, **k):
-        if session.get("role") != "admin":
-            flash("Acesso reservado ao administrador.")
+        if session.get("role") not in ("admin", "gestor"):
+            flash("Acesso reservado ao Gestor com permissões de administrador.")
             return redirect(url_for("dashboard"))
         return f(*a, **k)
     return w
 
+@app.before_request
+def technician_read_only_guard():
+    """Técnicos podem consultar e criar registos, mas não alterar/eliminar os existentes."""
+    if not session.get("uid") or session.get("role") in ("admin", "gestor"):
+        return None
+    path = (request.path or "").lower().rstrip("/")
+    method = request.method.upper()
+    # Áreas administrativas e ações que alteram registos existentes ou permissões.
+    restricted_prefixes = (
+        "/settings", "/users", "/admin", "/payments/source-document/",
+        "/payments/import-invoice", "/import/invoice-confirm", "/legal/check",
+        "/alerts/resolve/", "/users/toggle/", "/users/reset-password/",
+    )
+    restricted_fragments = ("/edit", "/delete", "/toggle", "/reset-password", "/resolve/", "/reconcile", "/associate", "/confirm", "/restore", "/cleanup/")
+    if path.startswith(restricted_prefixes) or any(part in path for part in restricted_fragments):
+        flash("Perfil Técnico: pode registar novas informações, mas não pode editar, confirmar ou eliminar registos existentes. Solicite apoio ao Gestor.")
+        return redirect(url_for("dashboard"))
+    # Impede operações destrutivas mesmo que sejam publicadas por um endpoint sem /delete no URL.
+    if method in ("PUT", "PATCH", "DELETE"):
+        flash("Operação não permitida ao perfil Técnico.")
+        return redirect(url_for("dashboard"))
+    return None
+
 @app.context_processor
 def globals_processor():
     return {"today": date.today(), "procedures": PROCEDURES, "contract_categories": CONTRACT_CATEGORIES,
-            "contracting_types": CONTRACTING_TYPES, "instrument_types": INSTRUMENT_TYPES}
+            "contracting_types": CONTRACTING_TYPES, "instrument_types": INSTRUMENT_TYPES,
+            "role_labels": {"admin": "Gestor", "gestor": "Gestor", "technician": "Técnico", "user": "Técnico"}}
 
 
 def parse_date(v, default="__TODAY__"):
@@ -1725,7 +1762,7 @@ def login():
     if request.method == "POST":
         u = User.query.filter_by(username=request.form.get("username", "").strip()).first()
         if u and u.active and check_password_hash(u.password_hash, request.form.get("password", "")):
-            session.update(uid=u.id, name=u.name, role=u.role)
+            session.update(uid=u.id, name=u.name, role=("admin" if u.role in ("admin", "gestor") else "technician"))
             return redirect(url_for("dashboard"))
         flash("Utilizador ou palavra-passe inválidos.")
     return render_template("login.html")
@@ -2685,37 +2722,75 @@ def _pdf_money(v):
     return f"Kz {money(v):,.2f}".replace(",", " ")
 
 
-def _supplier_pdf_bytes(supplier, invoices, generated_at=None):
+def _institution_profile():
+    profile = db.session.get(InstitutionProfile, 1)
+    if not profile:
+        profile = InstitutionProfile(id=1)
+        db.session.add(profile)
+        db.session.commit()
+    return profile
+
+
+def _supplier_pdf_bytes(supplier, invoices, generated_at=None, technician=None):
     if not REPORTLAB_AVAILABLE:
         raise RuntimeError("A biblioteca reportlab não está instalada.")
     generated_at = generated_at or datetime.now()
     metrics = _supplier_metrics(supplier.id, invoices)
+    profile = _institution_profile()
+    if technician is None:
+        current_user = db.session.get(User, session.get("uid")) if session.get("uid") else None
+        technician = current_user.name if current_user else "Não identificado"
     buf = io.BytesIO()
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="SmallBlue", parent=styles["Normal"], fontSize=8.5, textColor=colors.HexColor("#1e3a5f")))
-    styles.add(ParagraphStyle(name="TitleBlue", parent=styles["Title"], fontSize=18, leading=22, textColor=colors.HexColor("#17365d")))
-    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=16*mm, leftMargin=16*mm, topMargin=15*mm, bottomMargin=15*mm,
-                            title=f"Relatório - {supplier.name}", author="ChivuGest")
-    story = [Paragraph("CHIVUGEST", styles["TitleBlue"]),
-             Paragraph("RELATÓRIO DE CONTA CORRENTE DO FORNECEDOR", styles["Heading2"]), Spacer(1, 5*mm)]
-    info = [["Fornecedor", supplier.name], ["NIF", supplier.nif or "—"],
-            ["Categoria", supplier.category or "—"], ["Data de emissão", generated_at.strftime("%d/%m/%Y %H:%M")]]
-    t = Table(info, colWidths=[42*mm, 135*mm]); t.setStyle(TableStyle([("BACKGROUND",(0,0),(0,-1),colors.HexColor("#eff6ff")),("FONTNAME",(0,0),(-1,-1),"Helvetica"),("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#dbe3ef")),("VALIGN",(0,0),(-1,-1),"TOP"),("FONTSIZE",(0,0),(-1,-1),9),("PADDING",(0,0),(-1,-1),6)])); story += [t, Spacer(1, 6*mm)]
-    summary = [["Total faturado", "Total pago", "Saldo a pagar", "N.º faturas"],
+    styles.add(ParagraphStyle(name="SmallBlue", parent=styles["Normal"], fontSize=8, leading=10, textColor=colors.HexColor("#52657a")))
+    styles.add(ParagraphStyle(name="TitleBlue", parent=styles["Title"], fontSize=17, leading=20, textColor=colors.HexColor("#17365d"), alignment=1, spaceAfter=3))
+    styles.add(ParagraphStyle(name="SubtitleReport", parent=styles["Heading2"], fontSize=12, leading=15, textColor=colors.HexColor("#24364b"), alignment=1, spaceAfter=10))
+    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=15*mm, leftMargin=15*mm, topMargin=12*mm, bottomMargin=16*mm,
+                            title=f"Conta corrente - {supplier.name}", author=profile.institution_name or "ChivuGest")
+    story = []
+    logo_path = os.path.join(app.root_path, "static", "uploads", profile.logo_filename) if profile.logo_filename else ""
+    if logo_path and os.path.isfile(logo_path):
+        try:
+            logo = RLImage(logo_path, width=22*mm, height=22*mm, kind="proportional")
+            inst_lines = [Paragraph(f"<b>{profile.institution_name or 'Instituição utilizadora do ChivuGest'}</b>", styles["Normal"])]
+            if profile.ministry: inst_lines.append(Paragraph(profile.ministry, styles["SmallBlue"]))
+            contact = " · ".join(x for x in [profile.nif and f"NIF: {profile.nif}", profile.address, profile.phone, profile.email] if x)
+            if contact: inst_lines.append(Paragraph(contact.replace("&", "&amp;"), styles["SmallBlue"]))
+            header = Table([[logo, inst_lines]], colWidths=[27*mm, 148*mm])
+        except Exception:
+            header = None
+    else:
+        inst_lines = [Paragraph(f"<b>{profile.institution_name or 'Instituição utilizadora do ChivuGest'}</b>", styles["Normal"])]
+        if profile.ministry: inst_lines.append(Paragraph(profile.ministry, styles["SmallBlue"]))
+        contact = " · ".join(x for x in [profile.nif and f"NIF: {profile.nif}", profile.address, profile.phone, profile.email] if x)
+        if contact: inst_lines.append(Paragraph(contact.replace("&", "&amp;"), styles["SmallBlue"]))
+        header = Table([[inst_lines]], colWidths=[175*mm])
+    if header:
+        header.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"MIDDLE"),("LINEBELOW",(0,0),(-1,-1),1,colors.HexColor("#17365d")),("BOTTOMPADDING",(0,0),(-1,-1),8),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0)]))
+        story += [header, Spacer(1, 7*mm)]
+    story += [Paragraph("RELATÓRIO DE CONTA CORRENTE DO FORNECEDOR", styles["TitleBlue"]),
+              Paragraph("Posição financeira e detalhe de faturas", styles["SubtitleReport"])]
+    info = [["Fornecedor", supplier.name, "NIF", supplier.nif or "—"],
+            ["Categoria", supplier.category or "—", "Emitido em", generated_at.strftime("%d/%m/%Y %H:%M")],
+            ["Técnico responsável", technician or "Não identificado", "Estado do relatório", "Documento informativo"]]
+    t = Table(info, colWidths=[31*mm, 66*mm, 30*mm, 48*mm])
+    t.setStyle(TableStyle([("BACKGROUND",(0,0),(0,-1),colors.HexColor("#edf3fa")),("BACKGROUND",(2,0),(2,-1),colors.HexColor("#edf3fa")),("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"),("FONTNAME",(2,0),(2,-1),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#d5deea")),("VALIGN",(0,0),(-1,-1),"MIDDLE"),("FONTSIZE",(0,0),(-1,-1),8.5),("PADDING",(0,0),(-1,-1),6)]))
+    story += [t, Spacer(1, 5*mm)]
+    summary = [["TOTAL FATURADO", "TOTAL PAGO", "SALDO A PAGAR", "N.º FATURAS"],
                [_pdf_money(metrics["invoiced"]), _pdf_money(metrics["paid"]), _pdf_money(metrics["payable"]), str(metrics["count"])]]
-    st = Table(summary, colWidths=[44*mm]*4); st.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#f1f5f9")),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#dbe3ef")),("ALIGN",(0,0),(-1,-1),"CENTER"),("FONTSIZE",(0,0),(-1,-1),9),("PADDING",(0,0),(-1,-1),6)])); story += [st, Spacer(1, 7*mm), Paragraph("FATURAS", styles["Heading3"])]
-    # Ordem das colunas no PDF: a Ordem de Saque fica imediatamente depois do Total.
-    data = [["Fatura","Data","Total","Ordem de Saque (N.º)","Pago","Saldo","Estado"]]
+    st = Table(summary, colWidths=[43.75*mm]*4)
+    st.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365d")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#d5deea")),("ALIGN",(0,0),(-1,-1),"CENTER"),("FONTSIZE",(0,0),(-1,-1),8.5),("PADDING",(0,0),(-1,-1),7)]))
+    story += [st, Spacer(1, 7*mm), Paragraph("DETALHE DAS FATURAS", styles["Heading3"])]
+    data = [["Fatura", "Data", "Total", "Ordem de Saque (N.º)", "Pago", "Saldo", "Estado"]]
     for i in invoices:
         state = "Vencida" if money(i.total) > money(i.paid) and i.due_date and i.due_date < date.today() else (i.status or "Pendente")
         data.append([i.number, i.issue_date.strftime("%d/%m/%Y") if i.issue_date else "—", _pdf_money(i.total), _invoice_payment_order_numbers(i) or "—", _pdf_money(i.paid), _pdf_money(max(money(i.total)-money(i.paid),0)), state])
     if len(data)==1: data.append(["Sem faturas para os filtros selecionados","","","","","",""])
-    # Larguras somam 178 mm, respeitando a área útil A4 (210 - 32 mm de margens).
-    ft = Table(data, repeatRows=1, colWidths=[27*mm,23*mm,28*mm,34*mm,24*mm,24*mm,18*mm])
-    ft.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365d")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#dbe3ef")),("FONTSIZE",(0,0),(-1,-1),7.5),("PADDING",(0,0),(-1,-1),5),("VALIGN",(0,0),(-1,-1),"MIDDLE")]))
-    story += [ft, Spacer(1, 7*mm), Paragraph(f"Relatório gerado automaticamente pelo ChivuGest em {generated_at.strftime('%d/%m/%Y %H:%M')}.", styles["SmallBlue"])]
+    ft = Table(data, repeatRows=1, colWidths=[25*mm,22*mm,27*mm,34*mm,23*mm,24*mm,18*mm])
+    ft.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365d")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#d5deea")),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#f6f8fb")]),("FONTSIZE",(0,0),(-1,-1),7.2),("PADDING",(0,0),(-1,-1),5),("VALIGN",(0,0),(-1,-1),"MIDDLE")]))
+    story += [ft, Spacer(1, 7*mm), Paragraph(f"Documento gerado pelo ChivuGest em {generated_at.strftime('%d/%m/%Y às %H:%M')} por {technician or 'técnico não identificado'}.", styles["SmallBlue"])]
     def footer(canvas, doc):
-        canvas.saveState(); canvas.setFont("Helvetica",7); canvas.setFillColor(colors.HexColor("#64748b")); canvas.drawString(16*mm, 8*mm, "ChivuGest — Gestão empresarial, fornecedores, contratos e conformidade"); canvas.drawRightString(194*mm, 8*mm, f"Página {doc.page}"); canvas.restoreState()
+        canvas.saveState(); canvas.setStrokeColor(colors.HexColor("#d5deea")); canvas.line(15*mm, 12*mm, 195*mm, 12*mm); canvas.setFont("Helvetica",7); canvas.setFillColor(colors.HexColor("#64748b")); canvas.drawString(15*mm, 7*mm, "ChivuGest · Relatório de conta corrente"); canvas.drawRightString(195*mm, 7*mm, f"Página {doc.page}"); canvas.restoreState()
     doc.build(story, onFirstPage=footer, onLaterPages=footer)
     buf.seek(0); return buf.getvalue()
 
@@ -2881,7 +2956,8 @@ def supplier_report_pdf(supplier_id):
     if not supplier: abort(404)
     rows=_report_invoice_rows(supplier_id=supplier_id, status=request.args.get("status","Todos"), framework_id=request.args.get("framework_id",type=int), contract_id=request.args.get("contract_id",type=int), start_date=parse_date(request.args.get("start_date"),None), end_date=parse_date(request.args.get("end_date"),None))
     raw=_supplier_pdf_bytes(supplier,rows)
-    return send_file(io.BytesIO(raw),mimetype="application/pdf",as_attachment=True,download_name=f"Relatorio_{_safe_filename(supplier.name)}.pdf")
+    preview = request.args.get("preview") == "1"
+    return send_file(io.BytesIO(raw),mimetype="application/pdf",as_attachment=not preview,download_name=f"Relatorio_{_safe_filename(supplier.name)}.pdf")
 
 @app.route("/reports/suppliers/pdf-zip")
 @login_required
@@ -3162,13 +3238,31 @@ def invoice_confirm():
 @login_required
 @admin_required
 def settings():
+    profile = _institution_profile()
     if request.method == "POST":
         for rule in LegalRule.query.all():
             if rule.parameter and rule.parameter in request.form:
                 try: rule.value=Decimal(request.form[rule.parameter])
                 except InvalidOperation: pass
-        db.session.commit(); flash("Parâmetros legais atualizados.")
-    return render_template("settings.html", rules=LegalRule.query.order_by(LegalRule.id).all(), documents=LegalDocument.query.order_by(LegalDocument.id).all(), versions=LegalVersion.query.order_by(LegalVersion.effective_from.desc()).all(), checks=LegalUpdateCheck.query.order_by(LegalUpdateCheck.checked_at.desc()).all())
+        profile.institution_name = (request.form.get("institution_name") or "").strip() or "Instituição utilizadora do ChivuGest"
+        profile.ministry = (request.form.get("ministry") or "").strip()
+        profile.nif = (request.form.get("institution_nif") or "").strip()
+        profile.address = (request.form.get("institution_address") or "").strip()
+        profile.phone = (request.form.get("institution_phone") or "").strip()
+        profile.email = (request.form.get("institution_email") or "").strip()
+        logo = request.files.get("institution_logo")
+        if logo and logo.filename:
+            filename = secure_filename(logo.filename)
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in {".png", ".jpg", ".jpeg"}:
+                db.session.rollback(); flash("O logótipo deve estar em formato PNG ou JPG."); return redirect(url_for("settings"))
+            upload_dir = os.path.join(app.root_path, "static", "uploads")
+            os.makedirs(upload_dir, exist_ok=True)
+            safe_name = "institution_logo" + ext
+            logo.save(os.path.join(upload_dir, safe_name))
+            profile.logo_filename = safe_name
+        db.session.commit(); flash("Identificação institucional e parâmetros atualizados.")
+    return render_template("settings.html", profile=profile, rules=LegalRule.query.order_by(LegalRule.id).all(), documents=LegalDocument.query.order_by(LegalDocument.id).all(), versions=LegalVersion.query.order_by(LegalVersion.effective_from.desc()).all(), checks=LegalUpdateCheck.query.order_by(LegalUpdateCheck.checked_at.desc()).all())
 
 @app.route("/legal/check", methods=["POST"])
 @login_required
@@ -3551,7 +3645,10 @@ def admin_delete(model, record_id):
 def users():
     if request.method=="POST":
         try:
-            db.session.add(User(name=request.form["name"], username=request.form["username"], password_hash=generate_password_hash(request.form["password"]), role=request.form["role"], active=True))
+            role = request.form.get("role", "technician")
+            if role not in ("technician", "admin"):
+                role = "technician"
+            db.session.add(User(name=request.form["name"].strip(), username=request.form["username"].strip(), password_hash=generate_password_hash(request.form["password"]), role=role, active=True))
             db.session.commit(); flash("Utilizador criado.")
         except IntegrityError: db.session.rollback(); flash("Nome de utilizador já existe.")
     return render_template("users.html", rows=User.query.order_by(User.name).all())

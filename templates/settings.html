@@ -1,23 +1,33 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="pagehead"><div><h1>Configurações</h1><p class="muted">Parâmetros legais versionados e controlo de actualizações.</p></div><a class="btn secondary" href="/legal">Base legal</a></div>
-<div class="legal-note"><b>Importante:</b> o ChivuGest é um sistema de apoio à conformidade. Alterações legais detectadas automaticamente devem ser validadas pela entidade competente antes de alterar parâmetros utilizados nas verificações.</div>
-
-<div class="panel"><h2>Parâmetros activos</h2>
+<div class="pagehead"><div><h1>Configurações</h1><p class="muted">Identificação institucional, relatórios e parâmetros legais.</p></div><a class="btn secondary" href="/legal">Base legal</a></div>
+<div class="panel">
+  <h2>Identificação da instituição</h2>
+  <p class="muted">Estes dados serão apresentados no cabeçalho dos relatórios PDF de conta corrente. O logótipo é opcional.</p>
+  <form method="post" enctype="multipart/form-data" class="form">
+    <label>Nome oficial da instituição<input name="institution_name" value="{{ profile.institution_name or '' }}" required placeholder="Ex.: Instituto Oftalmológico Nacional de Angola"></label>
+    <label>Ministério / órgão de tutela<input name="ministry" value="{{ profile.ministry or '' }}" placeholder="Ex.: Ministério da Saúde"></label>
+    <label>NIF da instituição<input name="institution_nif" value="{{ profile.nif or '' }}"></label>
+    <label>Morada<input name="institution_address" value="{{ profile.address or '' }}"></label>
+    <label>Telefone<input name="institution_phone" value="{{ profile.phone or '' }}"></label>
+    <label>E-mail institucional<input name="institution_email" type="email" value="{{ profile.email or '' }}"></label>
+    <label>Logótipo (PNG ou JPG)<input type="file" name="institution_logo" accept="image/png,image/jpeg"></label>
+    {% if profile.logo_filename %}<p class="muted">Logótipo atual: <a href="{{ url_for('static', filename='uploads/' ~ profile.logo_filename) }}" target="_blank" rel="noopener">visualizar</a></p>{% endif %}
+    <button>Guardar identificação institucional</button>
+  </form>
+</div>
+<div class="panel"><h2>Parâmetros legais activos</h2>
 <form method="post"><table><tr><th>Regra</th><th>Base legal</th><th>Parâmetro</th><th>Valor</th></tr>
 {% for r in rules %}<tr><td><b>{{r.title}}</b><br><small>{{r.summary}}</small></td><td>{{r.source}} — {{r.article}}</td><td>{{r.parameter or '—'}}</td><td>{% if r.parameter %}<input name="{{r.parameter}}" type="number" step="0.01" value="{{r.value or ''}}">{% else %}—{% endif %}</td></tr>{% endfor %}
-</table><button>Guardar parâmetros</button></form></div>
-
+</table><button>Guardar parâmetros legais</button></form></div>
 <div class="panel"><h2>Versões legais</h2>
 <table><tr><th>Diploma</th><th>Versão</th><th>Exercício</th><th>Entrada em vigor</th><th>Fim</th><th>Estado</th></tr>
 {% for v in versions %}<tr><td>{{v.document.name}}</td><td>{{v.version}}</td><td>{{v.exercise or '—'}}</td><td>{{v.effective_from or '—'}}</td><td>{{v.effective_to or '—'}}</td><td>{{v.status}}</td></tr>{% else %}<tr><td colspan="6" class="empty">Nenhuma versão registada.</td></tr>{% endfor %}
 </table></div>
-
 <div class="panel"><h2>Últimas verificações automáticas</h2>
 <table><tr><th>Data</th><th>Diploma</th><th>Estado</th><th>Mensagem</th></tr>
 {% for c in checks[:20] %}<tr><td>{{c.checked_at.strftime('%d/%m/%Y %H:%M')}}</td><td>{{c.document.name}}</td><td>{{c.status}}</td><td>{{c.message}}</td></tr>{% else %}<tr><td colspan="4" class="empty">Nenhuma verificação realizada.</td></tr>{% endfor %}
 </table></div>
-
 <div class="panel"><h2>Fontes configuradas</h2>
 <table><tr><th>Diploma</th><th>Versão actual</th><th>Fonte</th></tr>{% for d in documents %}<tr><td>{{d.name}}</td><td>{{d.current_version}}</td><td><a href="{{d.source_url}}" target="_blank" rel="noopener">Abrir fonte</a></td></tr>{% endfor %}</table></div>
 {% endblock %}

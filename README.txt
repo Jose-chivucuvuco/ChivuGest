@@ -64,3 +64,9 @@ ACTUALIZAÇÃO — GESTÃO ACRUADA DE ACORDOS-QUADRO / CONTRATOS — 01/10/2026
 - O sistema impede que um contrato seja associado a um Acordo-Quadro no qual o fornecedor não participa.
 - O sistema impede que seja usado o instrumento "Contrato ao abrigo de Acordo-Quadro" sem seleccionar o Acordo-Quadro.
 - A listagem de Acordos-Quadro mostra quantos contratos estão associados, inclusive zero.
+
+PERFIS DE ACESSO (actualização 2026-10-16)
+- Técnico: pode consultar e registar novos dados nos módulos operacionais. Não pode editar, confirmar, reconciliar ou eliminar registos existentes, nem gerir utilizadores, configurações, administração de dados ou backups.
+- Gestor: perfil com permissões de administrador, incluindo edição, eliminação, configurações, utilizadores, auditoria e backups.
+- Contas antigas com perfil 'user' são tratadas como Técnico; contas 'admin' continuam a entrar como Gestor.
+- Os bloqueios de permissões são aplicados no servidor e não dependem apenas de ocultar botões na interface.
