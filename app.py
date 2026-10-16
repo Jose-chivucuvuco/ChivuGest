@@ -2073,6 +2073,10 @@ def import_payment_documents():
     try:
         filename=(f.filename or "").lower()
         created=0
+        # Inicializar antes de qualquer ramo: ficheiros tratados pelo extrator
+        # genérico também chegam às mensagens finais de importação.
+        # Sem isto, a mensagem referia uma variável ainda não definida.
+        excluded_non_company=0
         legacy_docfonte_orders_removed=0
         # DocFonte é documento-fonte para análise/rastreabilidade; não cria OS/pagamento.
         # Remove apenas OS legadas criadas pelo DocFonte por versões anteriores.
