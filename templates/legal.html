@@ -2,7 +2,7 @@
 {% block content %}
 <div class="pagehead">
  <div><h1>Base legal e motor de conformidade</h1><p class="muted">Fontes legais, versões e regras utilizadas pelo ChivuGest.</p></div>
- {% if session.role=='admin' %}<form method="post" action="/legal/check"><button class="btn">Verificar actualizações agora</button></form>{% endif %}
+ {% if session.role=='system_admin' %}<form method="post" action="/legal/check"><button class="btn">Verificar actualizações agora</button></form>{% endif %}
 </div>
 <div class="legal-note"><b>Actualização controlada:</b> o ChivuGest verifica as fontes configuradas e regista alterações. Uma alteração detectada fica pendente de validação humana; o sistema não transforma texto da Internet automaticamente em regra jurídica.</div>
 

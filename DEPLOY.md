@@ -13,10 +13,7 @@ Esta versão é preparada para vários utilizadores simultâneos e usa PostgreSQ
 6. O serviço terá um endereço HTTPS que poderá partilhar com os funcionários.
 
 ## Primeiro acesso
-Utilizador: `admin`
-Senha: `admin123`
-
-Altere a palavra-passe inicial antes de colocar o sistema em produção. A versão atual já cria utilizadores, mas recomenda-se acrescentar uma página específica de alteração de palavra-passe antes de uso empresarial definitivo.
+Não use credenciais padrão. Configure `SYSTEM_ADMIN_USERNAME` e `SYSTEM_ADMIN_PASSWORD` (mínimo de 12 caracteres) para criar o Administrador do Sistema. Para uma instalação nova, configure também `INITIAL_ADMIN_PASSWORD` (mínimo de 10 caracteres) para criar o Gestor da instituição principal. Guarde as credenciais no gestor de segredos do alojamento.
 
 ## OCR
 PDF digital pode ser lido com PyMuPDF. PDF escaneado depende do Tesseract OCR no servidor. Em serviços cloud, o Tesseract deve ser instalado no ambiente de execução e os idiomas `por`/`eng` devem estar disponíveis.
@@ -38,3 +35,7 @@ A opção manual **Verificar actualizações agora** está disponível em **Base
 ## Nota sobre actualização da base de dados
 
 A versão usa `db.create_all()` e as novas tabelas legais são aditivas. Não devem ser apagadas as bases de dados existentes durante a actualização.
+
+
+## Multi-instituição
+Defina SYSTEM_ADMIN_USERNAME e SYSTEM_ADMIN_PASSWORD no gestor de segredos para provisionar o Administrador do Sistema. Para uma instalação nova, defina também INITIAL_ADMIN_PASSWORD para o utilizador admin da instituição principal. Não use credenciais padrão. Na primeira inicialização a migração aditiva associa os registos antigos à instituição DEFAULT. Em PostgreSQL, a migração também substitui as restrições globais de código de Acordo-Quadro, procedimento e contrato por restrições por instituição. Faça backup e teste o isolamento entre instituições antes da produção. Em bases SQLite antigas, as restrições UNIQUE antigas exigem migração específica antes de permitir códigos repetidos entre instituições.

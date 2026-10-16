@@ -9,7 +9,7 @@
     <input name="name" placeholder="Nome" required>
     <input name="username" placeholder="Utilizador" required>
     <input name="password" type="password" placeholder="Palavra-passe inicial" required>
-    <select name="role" required><option value="technician">Técnico — registar sem editar</option><option value="admin">Gestor — administrador</option></select>
+    <select name="role" required><option value="technician">Técnico — registar sem editar</option><option value="institution_admin">Gestor institucional — administrador</option><option value="auditor">Consulta/Auditoria — apenas leitura</option></select>
     <button>Criar utilizador</button>
   </form>
   <p class="muted" style="font-size:12px;margin-top:10px"><b>Técnico:</b> pode consultar e registar novas informações; não pode editar, confirmar ou eliminar registos existentes. <b>Gestor:</b> tem permissões de administrador, incluindo gestão de utilizadores e configurações. As palavras-passe devem ter pelo menos 8 caracteres, incluindo maiúscula, minúscula e número.</p>
@@ -19,7 +19,7 @@
     <tr><th>Nome</th><th>Utilizador</th><th>Perfil</th><th>Estado</th><th>Ação</th></tr>
     {% for u in rows %}
     <tr>
-      <td>{{u.name}}</td><td>{{u.username}}</td><td>{{ "Gestor (Administrador)" if u.role in ["admin", "gestor"] else "Técnico (registo sem edição)" }}</td>
+      <td>{{u.name}}</td><td>{{u.username}}</td><td>{{ "Gestor institucional" if u.role in ["admin", "gestor", "institution_admin"] else ("Consulta/Auditoria" if u.role == "auditor" else "Técnico (registo sem edição)") }}</td>
       <td>{{"Ativo" if u.active else "Inativo"}}</td>
       <td class="actions">
         <a class="btn small secondary" href="/users/reset-password/{{u.id}}">🔐 Redefinir palavra-passe</a>

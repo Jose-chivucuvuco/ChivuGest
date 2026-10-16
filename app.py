@@ -7,7 +7,8 @@ from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.datastructures import FileStorage
 from werkzeug.utils import secure_filename
-from sqlalchemy import func, inspect, text, or_, and_
+from sqlalchemy import func, inspect, text, or_, and_, event, select
+from sqlalchemy.orm import with_loader_criteria, Session as SQLAlchemySession
 from sqlalchemy.exc import IntegrityError
 
 try:
@@ -52,6 +53,15 @@ db = SQLAlchemy(app)
 # release. The new procurement/supplier layer is additive and does not delete
 # existing data.
 # -----------------------------------------------------------------------------
+class Institution(db.Model):
+    __tablename__ = "institution"
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(220), nullable=False, unique=True, index=True)
+    code = db.Column(db.String(60), nullable=False, unique=True, index=True)
+    nif = db.Column(db.String(40), default="")
+    active = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(150), nullable=False)
@@ -63,7 +73,7 @@ class User(db.Model):
 
 class InstitutionProfile(db.Model):
     __tablename__ = "institution_profile"
-    id = db.Column(db.Integer, primary_key=True, default=1)
+    id = db.Column(db.Integer, primary_key=True)
     institution_name = db.Column(db.String(220), nullable=False, default="Instituição utilizadora do ChivuGest")
     ministry = db.Column(db.String(220), default="")
     nif = db.Column(db.String(40), default="")
@@ -109,7 +119,7 @@ class Payment(db.Model):
 class FrameworkAgreement(db.Model):
     __tablename__ = "framework_agreement"
     id = db.Column(db.Integer, primary_key=True)
-    code = db.Column(db.String(100), nullable=False, unique=True, index=True)
+    code = db.Column(db.String(100), nullable=False, index=True)
     object = db.Column(db.Text, nullable=False)
     procedure_type = db.Column(db.String(80), nullable=False, default="Concurso Limitado por Convite")
     start_date = db.Column(db.Date)
@@ -149,7 +159,7 @@ class Supplier(db.Model):
 
 class ProcurementProcedure(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    code = db.Column(db.String(100), nullable=False, unique=True)
+    code = db.Column(db.String(100), nullable=False, index=True)
     object = db.Column(db.Text, nullable=False)
     contract_category = db.Column(db.String(60), nullable=False, default="Bens")
     procedure_type = db.Column(db.String(80), nullable=False)
@@ -177,7 +187,7 @@ class ProcurementProcedure(db.Model):
 
 class Contract(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    number = db.Column(db.String(100), nullable=False, unique=True)
+    number = db.Column(db.String(100), nullable=False, index=True)
     supplier_id = db.Column(db.Integer, db.ForeignKey("supplier.id"), nullable=False)
     procedure_id = db.Column(db.Integer, db.ForeignKey("procurement_procedure.id"))
     object = db.Column(db.Text, nullable=False)
@@ -394,6 +404,31 @@ class BackupRecord(db.Model):
     status = db.Column(db.String(30), default="Concluído")
     user = db.relationship("User")
 
+# Tenant ownership is added to all institution-owned tables. The Institution table
+# itself is platform-level and is intentionally not tenant-filtered.
+ALL_INSTITUTION_COLUMN_MODELS = [User, InstitutionProfile, Client, Invoice, Payment, FrameworkAgreement,
+    Supplier, ProcurementProcedure, Contract, SupplierInvoice, SupplierPayment,
+    PaymentOrder, SourceDocument, ImportBatch, LegalRule, ComplianceAlert,
+    LegalDocument, LegalVersion, LegalUpdateCheck, AuditLog, BackupRecord]
+# Legislation/rules and their update history are platform-wide reference data;
+# operational records and audit logs are tenant-isolated.
+TENANT_MODELS = [User, InstitutionProfile, Client, Invoice, Payment, FrameworkAgreement,
+    Supplier, ProcurementProcedure, Contract, SupplierInvoice, SupplierPayment,
+    PaymentOrder, SourceDocument, ImportBatch, ComplianceAlert, AuditLog, BackupRecord]
+for _model in ALL_INSTITUTION_COLUMN_MODELS:
+    if not hasattr(_model, "institution_id"):
+        setattr(_model, "institution_id", db.Column(db.Integer, db.ForeignKey("institution.id"), nullable=True, index=True))
+
+for _table_name, _column_name, _constraint_name in [
+    ("framework_agreement", "code", "uq_framework_agreement_tenant_code"),
+    ("procurement_procedure", "code", "uq_procurement_procedure_tenant_code"),
+    ("contract", "number", "uq_contract_tenant_number"),
+]:
+    _table = db.metadata.tables.get(_table_name)
+    if _table is not None and _constraint_name not in {getattr(c, "name", None) for c in _table.constraints}:
+        _table.append_constraint(db.UniqueConstraint(_table.c.institution_id, _table.c[_column_name], name=_constraint_name))
+
+
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
@@ -407,6 +442,27 @@ CONTRACTING_TYPES = PROCEDURES + ["Outro / Regime especial"]
 INSTRUMENT_TYPES = ["Contrato público", "Acordo-Quadro", "Contrato ao abrigo de Acordo-Quadro", "Contrato público de aprovisionamento", "Concessão administrativa", "Concessão de obras públicas", "Concessão de serviços públicos", "Concessão de exploração do domínio público", "Parceria Público-Privada", "Outro / Regime especial"]
 
 
+def _current_tenant_id():
+    try:
+        from flask import has_request_context
+        if has_request_context():
+            return session.get("institution_id")
+    except Exception:
+        pass
+    return app.config.get("DEFAULT_INSTITUTION_ID")
+
+
+def _tenant_source_hash(raw_hash):
+    """Scope import deduplication hashes by institution without changing legacy DEFAULT hashes."""
+    if not raw_hash:
+        return raw_hash
+    tenant_id = _current_tenant_id() or app.config.get("DEFAULT_INSTITUTION_ID")
+    default_id = app.config.get("DEFAULT_INSTITUTION_ID")
+    if tenant_id is None or tenant_id == default_id:
+        return raw_hash  # preserves duplicate detection for pre-migration records
+    return hashlib.sha256(f"chivugest-tenant:{tenant_id}:{raw_hash}".encode("utf-8")).hexdigest()
+
+
 def login_required(f):
     @wraps(f)
     def w(*a, **k):
@@ -415,6 +471,8 @@ def login_required(f):
         u = db.session.get(User, session["uid"])
         if not u or not u.active:
             session.clear(); return redirect(url_for("login"))
+        if u.role != "system_admin" and not session.get("institution_id"):
+            session.clear(); return redirect(url_for("login"))
         return f(*a, **k)
     return w
 
@@ -422,41 +480,155 @@ def login_required(f):
 def admin_required(f):
     @wraps(f)
     def w(*a, **k):
-        if session.get("role") not in ("admin", "gestor"):
-            flash("Acesso reservado ao Gestor com permissões de administrador.")
+        if session.get("role") not in ("institution_admin", "system_admin"):
+            flash("Acesso reservado ao Gestor da instituição.")
             return redirect(url_for("dashboard"))
+        if session.get("role") == "system_admin" and not session.get("institution_id"):
+            return redirect(url_for("system_institutions"))
         return f(*a, **k)
     return w
+
+
+def system_admin_required(f):
+    @wraps(f)
+    def w(*a, **k):
+        if session.get("role") != "system_admin":
+            abort(403)
+        return f(*a, **k)
+    return w
+
+
+@event.listens_for(SQLAlchemySession, "do_orm_execute")
+def _apply_tenant_query_scope(execute_state):
+    # Platform-level institution management is not tenant-filtered. Business
+    # routes are blocked for system admins unless an explicit support context is set.
+    if execute_state.execution_options.get("skip_tenant_scope"):
+        return
+    tenant_id = _current_tenant_id()
+    if tenant_id is None:
+        return
+    stmt = execute_state.statement
+    for model in TENANT_MODELS:
+        stmt = stmt.options(with_loader_criteria(model, lambda cls, tid=tenant_id: cls.institution_id == tid, include_aliases=True))
+    execute_state.statement = stmt
+
+
+@event.listens_for(SQLAlchemySession, "before_flush")
+def _enforce_tenant_on_writes(db_session, flush_context, instances):
+    tenant_id = _current_tenant_id() or app.config.get("DEFAULT_INSTITUTION_ID")
+    role = session.get("role") if _has_request_context() else None
+    for obj in list(db_session.new):
+        if isinstance(obj, Institution):
+            continue
+        if hasattr(obj, "institution_id") and getattr(obj, "institution_id", None) is None:
+            # System administrators creating institution-specific users must set the tenant explicitly.
+            if isinstance(obj, User) and obj.role == "system_admin":
+                continue
+            if tenant_id is not None:
+                obj.institution_id = tenant_id
+    if role != "system_admin" and tenant_id is not None:
+        for obj in list(db_session.dirty) + list(db_session.deleted):
+            if hasattr(obj, "institution_id") and getattr(obj, "institution_id", None) != tenant_id:
+                raise PermissionError("Operação bloqueada: o registo pertence a outra instituição.")
+    # Validate foreign-key references as well: a crafted form must not associate
+    # an invoice/payment/contract from another tenant by guessing its numeric ID.
+    candidates = list(db_session.new) + list(db_session.dirty)
+    connection = db_session.connection()
+    for obj in candidates:
+        if not hasattr(obj, "institution_id") or isinstance(obj, Institution):
+            continue
+        obj_tenant = getattr(obj, "institution_id", None) or tenant_id
+        if obj_tenant is None:
+            continue
+        for fk in obj.__table__.foreign_keys:
+            target = fk.column.table
+            if target.name == "institution" or "institution_id" not in target.c:
+                continue
+            value = getattr(obj, fk.parent.name, None)
+            if value is None:
+                continue
+            target_pk = list(target.primary_key.columns)[0]
+            target_tenant = connection.execute(select(target.c.institution_id).where(target_pk == value)).scalar()
+            if target_tenant is not None and target_tenant != obj_tenant:
+                raise PermissionError("Associação bloqueada: não é permitido relacionar registos de instituições diferentes.")
+
+
+def _has_request_context():
+    from flask import has_request_context
+    return has_request_context()
+
+
+@app.before_request
+def tenant_and_role_guard():
+    if not session.get("uid"):
+        return None
+    path = (request.path or "").lower().rstrip("/") or "/"
+    if session.get("role") != "system_admin" and session.get("institution_id"):
+        active_institution = db.session.get(Institution, session.get("institution_id"))
+        if not active_institution or not active_institution.active:
+            session.clear()
+            flash("A instituição está suspensa ou indisponível. Contacte o Administrador do Sistema.")
+            return redirect(url_for("login"))
+    if session.get("role") == "system_admin":
+        allowed = (path.startswith("/system") or path in ("/logout", "/change-password", "/health", "/admin/backup", "/admin/backup/restore", "/legal", "/legal/check") or path.startswith("/static/"))
+        if not allowed:
+            return redirect(url_for("system_institutions"))
+
+
+@app.before_request
+def role_workspace_guard():
+    if not session.get("uid"):
+        return None
+    role = session.get("role")
+    path = (request.path or "").lower().rstrip("/") or "/"
+    common = ("/change-password", "/logout", "/health")
+    if role == "auditor":
+        allowed = path == "/" or path in common or path.startswith(("/reports", "/current", "/supplier-analysis", "/legal", "/static/"))
+        if not allowed:
+            flash("A sua área de trabalho é Consulta/Auditoria. O acesso a este módulo não está autorizado.")
+            return redirect(url_for("dashboard"))
+    elif role == "technician":
+        allowed = path == "/" or path in common or path.startswith(("/suppliers", "/invoices", "/payments", "/current", "/reports", "/import", "/supplier-analysis", "/legal", "/static/"))
+        if not allowed:
+            flash("A sua área de trabalho Técnica não inclui este módulo. Solicite autorização ao Gestor institucional.")
+            return redirect(url_for("dashboard"))
+
 
 @app.before_request
 def technician_read_only_guard():
     """Técnicos podem consultar e criar registos, mas não alterar/eliminar os existentes."""
-    if not session.get("uid") or session.get("role") in ("admin", "gestor"):
+    if not session.get("uid") or session.get("role") not in ("technician", "auditor", "user"):
         return None
     path = (request.path or "").lower().rstrip("/")
     method = request.method.upper()
-    # Áreas administrativas e ações que alteram registos existentes ou permissões.
-    restricted_prefixes = (
-        "/settings", "/users", "/admin", "/payments/source-document/",
-        "/payments/import-invoice", "/import/invoice-confirm", "/legal/check",
-        "/alerts/resolve/", "/users/toggle/", "/users/reset-password/",
-    )
+    restricted_prefixes = ("/settings", "/users", "/admin", "/payments/source-document/",
+        "/payments/import-invoice", "/import/invoice-confirm", "/legal/check", "/alerts/resolve/",
+        "/users/toggle/", "/users/reset-password/")
     restricted_fragments = ("/edit", "/delete", "/toggle", "/reset-password", "/resolve/", "/reconcile", "/associate", "/confirm", "/restore", "/cleanup/")
+    if session.get("role") == "auditor" and method == "POST" and path not in ("/change-password",):
+        flash("Perfil Consulta/Auditoria: acesso apenas de leitura.")
+        return redirect(url_for("dashboard"))
     if path.startswith(restricted_prefixes) or any(part in path for part in restricted_fragments):
         flash("Perfil Técnico: pode registar novas informações, mas não pode editar, confirmar ou eliminar registos existentes. Solicite apoio ao Gestor.")
         return redirect(url_for("dashboard"))
-    # Impede operações destrutivas mesmo que sejam publicadas por um endpoint sem /delete no URL.
     if method in ("PUT", "PATCH", "DELETE"):
         flash("Operação não permitida ao perfil Técnico.")
         return redirect(url_for("dashboard"))
-    return None
+
 
 @app.context_processor
 def globals_processor():
+    institution_profile = None
+    institution_id = session.get("institution_id") if _has_request_context() else None
+    if institution_id:
+        try:
+            institution_profile = InstitutionProfile.query.filter_by(institution_id=institution_id).first()
+        except Exception:
+            institution_profile = None
     return {"today": date.today(), "procedures": PROCEDURES, "contract_categories": CONTRACT_CATEGORIES,
             "contracting_types": CONTRACTING_TYPES, "instrument_types": INSTRUMENT_TYPES,
-            "role_labels": {"admin": "Gestor", "gestor": "Gestor", "technician": "Técnico", "user": "Técnico"}}
-
+            "institution_profile": institution_profile,
+            "role_labels": {"system_admin": "Administrador do Sistema", "institution_admin": "Gestor institucional", "admin": "Gestor institucional", "gestor": "Gestor institucional", "technician": "Técnico", "user": "Técnico", "auditor": "Consulta/Auditoria"}}
 
 def parse_date(v, default="__TODAY__"):
     if v is None or str(v).strip() == "":
@@ -1717,7 +1889,7 @@ def restore_payload(payload):
 
 @app.route("/admin/backup", methods=["GET","POST"])
 @login_required
-@admin_required
+@system_admin_required
 def backup_center():
     if request.method=="POST" and request.form.get("action")=="create":
         payload=make_backup_payload()
@@ -1732,7 +1904,7 @@ def backup_center():
 
 @app.route("/admin/backup/restore", methods=["POST"])
 @login_required
-@admin_required
+@system_admin_required
 def backup_restore():
     f=request.files.get("backup_file")
     if not f or not f.filename.lower().endswith(".json"):
@@ -1762,8 +1934,23 @@ def login():
     if request.method == "POST":
         u = User.query.filter_by(username=request.form.get("username", "").strip()).first()
         if u and u.active and check_password_hash(u.password_hash, request.form.get("password", "")):
-            session.update(uid=u.id, name=u.name, role=("admin" if u.role in ("admin", "gestor") else "technician"))
-            return redirect(url_for("dashboard"))
+            normalized = {"admin": "institution_admin", "gestor": "institution_admin", "user": "technician"}.get(u.role, u.role)
+            if normalized != "system_admin" and not u.institution_id:
+                flash("Este utilizador ainda não está associado a uma instituição. Contacte o administrador do sistema.")
+                return render_template("login.html")
+            if normalized != "system_admin":
+                linked_inst = db.session.get(Institution, u.institution_id)
+                if not linked_inst or not linked_inst.active:
+                    flash("A instituição deste utilizador está suspensa ou indisponível.")
+                    return render_template("login.html")
+            session.clear()
+            session.update(uid=u.id, name=u.name, role=normalized)
+            if normalized != "system_admin":
+                session["institution_id"] = u.institution_id
+                inst = db.session.get(Institution, u.institution_id)
+                session["institution_name"] = inst.name if inst else "Instituição"
+                return redirect(url_for("dashboard"))
+            return redirect(url_for("system_institutions"))
         flash("Utilizador ou palavra-passe inválidos.")
     return render_template("login.html")
 
@@ -2185,7 +2372,7 @@ def import_payment_documents():
             # é muito mais barato que fazer .first() para cada uma das 2.918 linhas.
             existing_hashes={
                 x[0] for x in db.session.query(SourceDocument.source_hash)
-                .filter(SourceDocument.source_filename == f.filename).all()
+                .filter(SourceDocument.institution_id == session.get("institution_id"), SourceDocument.source_filename == f.filename).all()
                 if x[0]
             }
 
@@ -2341,9 +2528,10 @@ def import_payment_documents():
                         continue
 
                 parsed["hash"]=hashlib.sha256((upload_hash+json.dumps(parsed,sort_keys=True,default=str)).encode()).hexdigest()
-                if parsed["hash"] in seen_hashes:
+                tenant_hash = _tenant_source_hash(parsed["hash"])
+                if tenant_hash in seen_hashes:
                     continue
-                seen_hashes.add(parsed["hash"])
+                seen_hashes.add(tenant_hash)
 
                 cache_key=(parsed.get("nif") or "", _normalize_match_text(parsed.get("supplier") or ""), parsed.get("invoice_number") or "", money(parsed.get("amount")))
                 if cache_key in match_cache:
@@ -2378,6 +2566,7 @@ def import_payment_documents():
                 framework_id=(contract.framework_agreement_id if contract else (invoice.framework_agreement_id if invoice else None))
                 extracted=json.dumps(parsed,ensure_ascii=False,default=str)
                 source_rows.append({
+                    "institution_id":session.get("institution_id"),
                     "document_type":source_type,
                     "document_number":parsed["os_number"],
                     "supplier_id":supplier_id,
@@ -2385,7 +2574,7 @@ def import_payment_documents():
                     "contract_id":contract.id if contract else None,
                     "framework_agreement_id":framework_id,
                     "source_filename":f.filename,
-                    "source_hash":parsed["hash"],
+                    "source_hash":_tenant_source_hash(parsed["hash"]),
                     "issue_date":parsed["date_parsed"],
                     "amount":parsed["amount"],
                     "extracted_data":extracted,
@@ -2401,6 +2590,7 @@ def import_payment_documents():
                     if normalized_status == "Paga" and parsed["date_parsed"] is not None:
                         if payment_key not in existing_payment_keys and payment_key not in pending_payment_keys:
                             docfonte_payment_rows.append({
+                                "institution_id":session.get("institution_id"),
                                 "receipt": parsed["os_number"],
                                 "supplier_id": supplier_id,
                                 "invoice_id": invoice.id if invoice else None,
@@ -2422,6 +2612,7 @@ def import_payment_documents():
                             source_rows[-1]["reconciliation_notes"] = recon_notes
                 else:
                     payment_rows.append({
+                        "institution_id":session.get("institution_id"),
                         "os_number":parsed["os_number"],
                         "supplier_id":supplier_id,
                         "invoice_id":invoice.id if invoice else None,
@@ -2433,7 +2624,7 @@ def import_payment_documents():
                         "bank_reference":parsed["bank_reference"],
                         "source_type":source_type,
                         "source_filename":f.filename,
-                        "source_hash":parsed["hash"],
+                        "source_hash":_tenant_source_hash(parsed["hash"]),
                         "extracted_data":extracted,
                         "reconciliation_status":recon_status,
                         "reconciliation_notes":recon_notes
@@ -2447,7 +2638,8 @@ def import_payment_documents():
 
         else:
             parsed=extract_generic_source_document(f)
-            if SourceDocument.query.filter_by(source_hash=parsed["hash"]).first() or (source_type_key != "docfonte" and PaymentOrder.query.filter_by(source_hash=parsed["hash"]).first()):
+            tenant_hash = _tenant_source_hash(parsed["hash"])
+            if SourceDocument.query.filter_by(source_hash=tenant_hash).first() or (source_type_key != "docfonte" and PaymentOrder.query.filter_by(source_hash=tenant_hash).first()):
                 raise ValueError("Este documento já foi importado anteriormente.")
             supplier,invoice,contract,recon_status,recon_notes=match_payment_order(parsed)
             if not supplier:
@@ -2456,10 +2648,10 @@ def import_payment_documents():
                 if not supplier:
                     supplier=Supplier(name=sname,nif=parsed.get("nif") or None,contracting_type="Outro / Regime especial")
                     db.session.add(supplier); db.session.flush()
-            doc=SourceDocument(document_type=source_type,document_number=parsed.get("os_number") or parsed.get("invoice_number") or None,supplier_id=supplier.id,source_filename=parsed["filename"],source_hash=parsed["hash"],issue_date=parsed.get("date_parsed"),amount=parsed.get("amount",0),extracted_data=json.dumps(parsed,ensure_ascii=False,default=str),import_confidence=parsed.get("confidence",0))
+            doc=SourceDocument(document_type=source_type,document_number=parsed.get("os_number") or parsed.get("invoice_number") or None,supplier_id=supplier.id,source_filename=parsed["filename"],source_hash=tenant_hash,issue_date=parsed.get("date_parsed"),amount=parsed.get("amount",0),extracted_data=json.dumps(parsed,ensure_ascii=False,default=str),import_confidence=parsed.get("confidence",0))
             db.session.add(doc)
             if source_type_key != "docfonte":
-                osr=PaymentOrder(os_number=parsed.get("os_number") or parsed.get("invoice_number") or "SEM-NUMERO",supplier_id=supplier.id,invoice_id=invoice.id if invoice else None,contract_id=contract.id if contract else None,framework_agreement_id=(contract.framework_agreement_id if contract else (invoice.framework_agreement_id if invoice else None)),issue_date=parsed.get("date_parsed"),amount=parsed.get("amount",0),status=normalize_os_status(parsed.get("status")),bank_reference=parsed.get("bank_reference"),source_type=source_type,source_filename=parsed["filename"],source_hash=parsed["hash"],extracted_data=json.dumps(parsed,ensure_ascii=False,default=str),reconciliation_status=recon_status,reconciliation_notes=recon_notes)
+                osr=PaymentOrder(os_number=parsed.get("os_number") or parsed.get("invoice_number") or "SEM-NUMERO",supplier_id=supplier.id,invoice_id=invoice.id if invoice else None,contract_id=contract.id if contract else None,framework_agreement_id=(contract.framework_agreement_id if contract else (invoice.framework_agreement_id if invoice else None)),issue_date=parsed.get("date_parsed"),amount=parsed.get("amount",0),status=normalize_os_status(parsed.get("status")),bank_reference=parsed.get("bank_reference"),source_type=source_type,source_filename=parsed["filename"],source_hash=tenant_hash,extracted_data=json.dumps(parsed,ensure_ascii=False,default=str),reconciliation_status=recon_status,reconciliation_notes=recon_notes)
                 db.session.add(osr)
             created=1; db.session.commit()
         if source_type_key == "docfonte":
@@ -2723,9 +2915,11 @@ def _pdf_money(v):
 
 
 def _institution_profile():
-    profile = db.session.get(InstitutionProfile, 1)
+    institution_id = session.get("institution_id")
+    profile = InstitutionProfile.query.filter_by(institution_id=institution_id).first()
     if not profile:
-        profile = InstitutionProfile(id=1)
+        inst = db.session.get(Institution, institution_id) if institution_id else None
+        profile = InstitutionProfile(institution_id=institution_id, institution_name=inst.name if inst else "Instituição utilizadora do ChivuGest")
         db.session.add(profile)
         db.session.commit()
     return profile
@@ -3003,9 +3197,10 @@ def report_document_upload():
     if not f.filename.lower().endswith(".pdf"): flash("A importação documental nesta área aceita apenas PDF."); return redirect(url_for("reports",supplier_id=supplier_id))
     raw=f.read(); digest=hashlib.sha256(raw).hexdigest()
     try:
-        if SourceDocument.query.filter_by(source_hash=digest).first(): raise ValueError("Este PDF já foi importado.")
+        tenant_hash = _tenant_source_hash(digest)
+        if SourceDocument.query.filter_by(source_hash=tenant_hash).first(): raise ValueError("Este PDF já foi importado.")
         parsed=extract_pdf_or_image(FileStorage(stream=io.BytesIO(raw), filename=f.filename, content_type=f.mimetype or "application/pdf"))
-        doc=SourceDocument(document_type=document_type,document_number=parsed.get("number"),supplier_id=supplier_id,source_filename=f.filename,source_hash=digest,issue_date=parse_date(parsed.get("date"),None),amount=num(parsed.get("total")),extracted_data=json.dumps(parsed,ensure_ascii=False,default=str),import_confidence=int(parsed.get("confidence",0)),content=raw)
+        doc=SourceDocument(document_type=document_type,document_number=parsed.get("number"),supplier_id=supplier_id,source_filename=f.filename,source_hash=tenant_hash,issue_date=parse_date(parsed.get("date"),None),amount=num(parsed.get("total")),extracted_data=json.dumps(parsed,ensure_ascii=False,default=str),import_confidence=int(parsed.get("confidence",0)),content=raw)
         inv_id=request.form.get("invoice_id",type=int)
         if inv_id:
             inv=db.session.get(SupplierInvoice,inv_id)
@@ -3060,7 +3255,7 @@ def analyze_invoice_import(data):
     contract=_find_contract_for_invoice(data, supplier, framework)
     number=str(data.get("number") or "").strip()
     amount=money(data.get("total"))
-    duplicate_hash=SupplierInvoice.query.filter_by(source_hash=data.get("hash")).first() if data.get("hash") else None
+    duplicate_hash=SupplierInvoice.query.filter_by(source_hash=_tenant_source_hash(data.get("hash"))).first() if data.get("hash") else None
     duplicates=[]
     if supplier and number:
         duplicates=SupplierInvoice.query.filter(SupplierInvoice.supplier_id==supplier.id).all()
@@ -3181,7 +3376,7 @@ def import_center():
                 db.session.commit(); flash(f"Lote analisado: {batch.total_records} documento(s), {valid} válido(s), {review} para revisão e {dup} duplicado(s).")
             elif kind == "pdf_invoice":
                 parsed=analyze_invoice_import(extract_invoice_document(f))
-                existing=SupplierInvoice.query.filter_by(source_hash=parsed["hash"]).first()
+                existing=SupplierInvoice.query.filter_by(source_hash=_tenant_source_hash(parsed["hash"])).first()
                 if existing: parsed["duplicate"]=True; parsed["issues"]=["Documento já importado anteriormente por hash."]
                 session["invoice_import"] = parsed
                 return render_template("invoice_review.html", data=parsed)
@@ -3222,7 +3417,7 @@ def invoice_confirm():
         if contract and contract.supplier_id!=s.id: raise ValueError("O contrato seleccionado não pertence ao fornecedor.")
         if contract and framework and contract.framework_agreement_id!=framework.id: raise ValueError("Contrato e Acordo-Quadro não correspondem.")
         if SupplierInvoice.query.filter(SupplierInvoice.supplier_id==s.id).all() and any(_invoice_number_matches(number,i.number) for i in SupplierInvoice.query.filter_by(supplier_id=s.id).all()): raise ValueError("Já existe uma fatura com este número para o fornecedor.")
-        inv=SupplierInvoice(number=number,supplier_id=s.id,contract_id=contract.id if contract else None,framework_agreement_id=framework.id if framework else None,issue_date=parse_date(request.form.get("date")),due_date=parse_date(request.form.get("due_date"),None),subtotal=subtotal,vat=vat,total=total,paid=0,currency=request.form.get("currency") or "AOA",source_filename=data.get("filename"),source_hash=data.get("hash"),raw_text=data.get("text","")[:120000],extracted_data=json.dumps(data,ensure_ascii=False,default=str),import_confidence=int(data.get("confidence",0)))
+        inv=SupplierInvoice(number=number,supplier_id=s.id,contract_id=contract.id if contract else None,framework_agreement_id=framework.id if framework else None,issue_date=parse_date(request.form.get("date")),due_date=parse_date(request.form.get("due_date"),None),subtotal=subtotal,vat=vat,total=total,paid=0,currency=request.form.get("currency") or "AOA",source_filename=data.get("filename"),source_hash=_tenant_source_hash(data.get("hash")),raw_text=data.get("text","")[:120000],extracted_data=json.dumps(data,ensure_ascii=False,default=str),import_confidence=int(data.get("confidence",0)))
         inv.status="Pendente"
         db.session.add(inv); db.session.flush()
 
@@ -3240,13 +3435,21 @@ def invoice_confirm():
 def settings():
     profile = _institution_profile()
     if request.method == "POST":
-        for rule in LegalRule.query.all():
-            if rule.parameter and rule.parameter in request.form:
-                try: rule.value=Decimal(request.form[rule.parameter])
-                except InvalidOperation: pass
-        profile.institution_name = (request.form.get("institution_name") or "").strip() or "Instituição utilizadora do ChivuGest"
+        # Legal rules are platform-wide reference data. Institutional settings
+        # must not mutate thresholds globally; those are managed by the platform.
+        new_institution_name = (request.form.get("institution_name") or "").strip() or "Instituição utilizadora do ChivuGest"
+        duplicate_name = Institution.query.filter(Institution.name == new_institution_name, Institution.id != session.get("institution_id")).first()
+        if duplicate_name:
+            flash("Já existe uma instituição com esse nome. Escolha uma identificação diferente.")
+            return redirect(url_for("settings"))
+        profile.institution_name = new_institution_name
+        linked_institution = db.session.get(Institution, session.get("institution_id"))
+        if linked_institution:
+            linked_institution.name = new_institution_name
         profile.ministry = (request.form.get("ministry") or "").strip()
         profile.nif = (request.form.get("institution_nif") or "").strip()
+        if linked_institution:
+            linked_institution.nif = profile.nif
         profile.address = (request.form.get("institution_address") or "").strip()
         profile.phone = (request.form.get("institution_phone") or "").strip()
         profile.email = (request.form.get("institution_email") or "").strip()
@@ -3258,15 +3461,17 @@ def settings():
                 db.session.rollback(); flash("O logótipo deve estar em formato PNG ou JPG."); return redirect(url_for("settings"))
             upload_dir = os.path.join(app.root_path, "static", "uploads")
             os.makedirs(upload_dir, exist_ok=True)
-            safe_name = "institution_logo" + ext
+            safe_name = f"institution_{session.get('institution_id', 'default')}_logo" + ext
             logo.save(os.path.join(upload_dir, safe_name))
             profile.logo_filename = safe_name
-        db.session.commit(); flash("Identificação institucional e parâmetros atualizados.")
+        db.session.commit()
+        session["institution_name"] = profile.institution_name
+        flash("Identificação institucional e parâmetros atualizados.")
     return render_template("settings.html", profile=profile, rules=LegalRule.query.order_by(LegalRule.id).all(), documents=LegalDocument.query.order_by(LegalDocument.id).all(), versions=LegalVersion.query.order_by(LegalVersion.effective_from.desc()).all(), checks=LegalUpdateCheck.query.order_by(LegalUpdateCheck.checked_at.desc()).all())
 
 @app.route("/legal/check", methods=["POST"])
 @login_required
-@admin_required
+@system_admin_required
 def legal_check():
     results = check_legal_updates()
     changed = sum(1 for _, status in results if "Alteração" in status)
@@ -3293,11 +3498,11 @@ def legal_library():
 ADMIN_MODELS = {
     "supplier": Supplier, "supplier_invoice": SupplierInvoice, "supplier_payment": SupplierPayment,
     "contract": Contract, "procedure": ProcurementProcedure, "client": Client, "invoice": Invoice,
-    "payment": Payment, "user": User, "legal_rule": LegalRule, "legal_document": LegalDocument, "legal_version": LegalVersion, "legal_update_check": LegalUpdateCheck,
+    "payment": Payment, "user": User,
     "alert": ComplianceAlert, "payment_order": PaymentOrder, "source_document": SourceDocument,
 }
 # Fields that are generated/system-only or intentionally removed from the supplier UI.
-ADMIN_EXCLUDED = {"id", "created_at", "password_hash", "source_hash", "raw_text", "extracted_data", "import_confidence"}
+ADMIN_EXCLUDED = {"id", "created_at", "password_hash", "source_hash", "raw_text", "extracted_data", "import_confidence", "institution_id", "role"}
 ADMIN_MODEL_EXCLUDED = {"Supplier": {"portal_status", "certification_status", "tax_clearance_expiry", "social_security_expiry", "professional_license_expiry", "blocked"}}
 
 
@@ -3333,7 +3538,7 @@ def admin_field_specs(model):
 @login_required
 @admin_required
 def admin_data():
-    labels={"supplier":"Fornecedores","supplier_invoice":"Faturas de fornecedores","supplier_payment":"Pagamentos de fornecedores","contract":"Contratos","procedure":"Contratação pública","client":"Clientes","invoice":"Faturas legadas","payment":"Pagamentos legados","user":"Utilizadores","legal_rule":"Regras legais","legal_document":"Documentos legais","alert":"Alertas", "payment_order":"Ordens de Saque", "source_document":"Documentos Fonte", "legal_version":"Versões legais", "legal_update_check":"Verificações legais"}
+    labels={"supplier":"Fornecedores","supplier_invoice":"Faturas de fornecedores","supplier_payment":"Pagamentos de fornecedores","contract":"Contratos","procedure":"Contratação pública","client":"Clientes","invoice":"Faturas legadas","payment":"Pagamentos legados","user":"Utilizadores","alert":"Alertas", "payment_order":"Ordens de Saque", "source_document":"Documentos Fonte"}
     datasets=[(k, ADMIN_MODELS[k], ADMIN_MODELS[k].query.order_by(ADMIN_MODELS[k].id.desc()).limit(100).all()) for k in ADMIN_MODELS]
     return render_template("admin_data.html", datasets=datasets, labels=labels)
 
@@ -3639,6 +3844,47 @@ def admin_delete(model, record_id):
         db.session.rollback(); flash("Erro ao eliminar: "+str(e))
     return redirect(url_for("admin_data"))
 
+@app.route("/system/institutions", methods=["GET", "POST"])
+@login_required
+@system_admin_required
+def system_institutions():
+    if request.method == "POST":
+        name = (request.form.get("name") or "").strip()
+        code = (request.form.get("code") or "").strip().upper()
+        admin_name = (request.form.get("admin_name") or "").strip()
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+        if not name or not code or not admin_name or not username or len(password) < 10:
+            flash("Preencha os dados da instituição e do Gestor. A palavra-passe inicial deve ter pelo menos 10 caracteres.")
+        else:
+            try:
+                inst = Institution(name=name, code=code, nif=(request.form.get("nif") or "").strip(), active=True)
+                db.session.add(inst); db.session.flush()
+                db.session.add(InstitutionProfile(institution_id=inst.id, institution_name=name, nif=inst.nif or ""))
+                db.session.add(User(name=admin_name, username=username, password_hash=generate_password_hash(password), role="institution_admin", active=True, institution_id=inst.id))
+                db.session.commit()
+                flash("Instituição criada com o seu Gestor institucional.")
+            except IntegrityError:
+                db.session.rollback(); flash("Código, nome de instituição ou utilizador já existente.")
+    rows = Institution.query.order_by(Institution.name).all()
+    return render_template("system_institutions.html", rows=rows)
+
+
+@app.route("/system/institutions/<int:institution_id>/toggle", methods=["POST"])
+@login_required
+@system_admin_required
+def system_toggle_institution(institution_id):
+    inst = db.session.get(Institution, institution_id)
+    if inst:
+        if inst.code == "DEFAULT" and inst.active:
+            flash("A instituição principal não pode ser suspensa por esta operação.")
+            return redirect(url_for("system_institutions"))
+        inst.active = not inst.active
+        db.session.commit()
+        flash("Estado da instituição atualizado.")
+    return redirect(url_for("system_institutions"))
+
+
 @app.route("/users", methods=["GET", "POST"])
 @login_required
 @admin_required
@@ -3646,9 +3892,12 @@ def users():
     if request.method=="POST":
         try:
             role = request.form.get("role", "technician")
-            if role not in ("technician", "admin"):
+            if role not in ("technician", "institution_admin", "auditor"):
                 role = "technician"
-            db.session.add(User(name=request.form["name"].strip(), username=request.form["username"].strip(), password_hash=generate_password_hash(request.form["password"]), role=role, active=True))
+            if len(request.form.get("password", "")) < 10:
+                flash("A palavra-passe inicial deve ter pelo menos 10 caracteres.")
+                return redirect(url_for("users"))
+            db.session.add(User(name=request.form["name"].strip(), username=request.form["username"].strip(), password_hash=generate_password_hash(request.form["password"]), role=role, active=True, institution_id=session.get("institution_id")))
             db.session.commit(); flash("Utilizador criado.")
         except IntegrityError: db.session.rollback(); flash("Nome de utilizador já existe.")
     return render_template("users.html", rows=User.query.order_by(User.name).all())
@@ -3747,9 +3996,59 @@ def health(): return "OK", 200
 # Database initialisation. Existing tables are preserved. New tables are added.
 # -----------------------------------------------------------------------------
 def ensure_schema():
-    """Lightweight additive migration for existing SQLite/PostgreSQL installations."""
+    """Additive migration: tenant ownership and safe legacy-data assignment."""
     inspector = inspect(db.engine)
     tables = set(inspector.get_table_names())
+    # Create a default institution and attach existing single-tenant data to it.
+    default_inst = Institution.query.filter_by(code="DEFAULT").first()
+    if not default_inst:
+        legacy_name = "Instituição Principal"
+        if "institution_profile" in tables:
+            try:
+                with db.engine.connect() as conn:
+                    row = conn.execute(text("SELECT institution_name FROM institution_profile ORDER BY id LIMIT 1")).first()
+                    if row and row[0]: legacy_name = str(row[0])
+            except Exception:
+                pass
+        default_inst = Institution(name=legacy_name, code="DEFAULT", active=True)
+        db.session.add(default_inst); db.session.commit()
+    app.config["DEFAULT_INSTITUTION_ID"] = default_inst.id
+    # Existing app tables receive an institution_id column; old records are
+    # assigned to the original institution to preserve their current visibility.
+    for model in ALL_INSTITUTION_COLUMN_MODELS:
+        table = model.__tablename__
+        if table not in tables:
+            continue
+        names = {c["name"] for c in inspect(db.engine).get_columns(table)}
+        if "institution_id" not in names:
+            with db.engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN institution_id INTEGER"))
+        with db.engine.begin() as conn:
+            conn.execute(text(f"UPDATE {table} SET institution_id=:iid WHERE institution_id IS NULL"), {"iid": default_inst.id})
+    # PostgreSQL: replace legacy global business-code uniqueness with tenant-level
+    # uniqueness so two institutions can use their own numbering conventions.
+    if db.engine.dialect.name == "postgresql":
+        for table_name, column_name, composite_name in [
+            ("framework_agreement", "code", "uq_framework_agreement_tenant_code"),
+            ("procurement_procedure", "code", "uq_procurement_procedure_tenant_code"),
+            ("contract", "number", "uq_contract_tenant_number"),
+        ]:
+            current = inspect(db.engine)
+            with db.engine.begin() as conn:
+                for constraint in current.get_unique_constraints(table_name):
+                    if constraint.get("column_names") == [column_name] and constraint.get("name"):
+                        conn.execute(text(f'ALTER TABLE "{table_name}" DROP CONSTRAINT IF EXISTS "{constraint["name"]}"'))
+                current = inspect(db.engine)
+                for index in current.get_indexes(table_name):
+                    if index.get("unique") and index.get("column_names") == [column_name] and index.get("name"):
+                        conn.execute(text(f'DROP INDEX IF EXISTS "{index["name"]}"'))
+                conn.execute(text(f'CREATE UNIQUE INDEX IF NOT EXISTS "{composite_name}" ON "{table_name}" (institution_id, "{column_name}")'))
+    # Legacy roles become explicit institution-level roles; platform admins are
+    # provisioned separately using environment variables, never a default password.
+    with db.engine.begin() as conn:
+        if "user" in inspect(db.engine).get_table_names():
+            conn.execute(text("UPDATE user SET role='institution_admin' WHERE role IN ('admin','gestor')"))
+            conn.execute(text("UPDATE user SET role='technician' WHERE role='user' OR role IS NULL OR role=''"))
     if "framework_agreement" not in tables:
         FrameworkAgreement.__table__.create(bind=db.engine, checkfirst=True)
     if "framework_supplier" not in tables:
@@ -3794,8 +4093,19 @@ def init_db():
     with app.app_context():
         db.create_all()
         ensure_schema()
-        if not User.query.filter_by(username="admin").first():
-            db.session.add(User(name="Administrador",username="admin",password_hash=generate_password_hash("admin123"),role="admin"))
+        default_inst = Institution.query.filter_by(code="DEFAULT").first()
+        app.config["DEFAULT_INSTITUTION_ID"] = default_inst.id if default_inst else None
+        initial_admin_password = os.environ.get("INITIAL_ADMIN_PASSWORD", "")
+        existing_initial_admin = User.query.execution_options(skip_tenant_scope=True).filter_by(username="admin").first()
+        if not existing_initial_admin and len(initial_admin_password) >= 10:
+            db.session.add(User(name="Administrador da Instituição", username="admin", password_hash=generate_password_hash(initial_admin_password), role="institution_admin", institution_id=default_inst.id if default_inst else None))
+            db.session.commit()
+        # Optional platform administrator: explicitly configured by deployment secrets.
+        system_username = os.environ.get("SYSTEM_ADMIN_USERNAME", "").strip()
+        system_password = os.environ.get("SYSTEM_ADMIN_PASSWORD", "")
+        existing_system_admin = (User.query.execution_options(skip_tenant_scope=True).filter_by(username=system_username).first() if system_username else None)
+        if system_username and len(system_password) >= 12 and not existing_system_admin:
+            db.session.add(User(name="Administrador do Sistema", username=system_username, password_hash=generate_password_hash(system_password), role="system_admin", institution_id=None, active=True))
             db.session.commit()
         seed_legal_data()
         seed_legal_versions()

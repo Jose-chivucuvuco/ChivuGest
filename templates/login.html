@@ -1,1 +1,21 @@
-<!doctype html><html lang="pt"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ChivuGest — Acesso</title><link rel="stylesheet" href="/static/style.css"></head><body class="login"><form method="post" class="loginbox"><div class="logo dark">Ch<span>ivuGest</span></div><h2>Acesso ao sistema</h2><input name="username" placeholder="Utilizador" required><input name="password" type="password" placeholder="Palavra-passe" required><button>Entrar</button>{% for m in get_flashed_messages() %}<div class="error">{{m}}</div>{% endfor %}<small>Conta inicial: admin / admin123. Altere a palavra-passe antes de produção.</small></form></body></html>
+<!doctype html>
+<html lang="pt"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ChivuGest — Acesso</title><link rel="stylesheet" href="/static/style.css"></head>
+<body class="login-page">
+  <main class="login-layout">
+    <section class="login-intro">
+      <a class="login-brand" href="/login"><span class="brand-mark brand-mark-large">CG</span><span><strong>ChivuGest</strong><small>Gestão financeira e contratação</small></span></a>
+      <div class="intro-message"><span class="intro-kicker">PLATAFORMA DE GESTÃO INTEGRADA</span><h1>Mais controlo.<br><em>Melhores decisões.</em></h1><p>Gestão de fornecedores, faturas, pagamentos, contratos e conformidade numa plataforma única.</p><div class="intro-features"><span><b>✓</b> Informação organizada</span><span><b>✓</b> Acessos por perfil</span><span><b>✓</b> Separação por instituição</span></div></div>
+      <div class="login-legal"><span>© 2026 ChivuGest</span><span>Ambiente de acesso seguro</span></div>
+    </section>
+    <section class="login-stage"><div class="login-orb orb-one"></div><div class="login-orb orb-two"></div>
+      <form method="post" class="login-card">
+        <div class="login-card-icon">↗</div><div class="login-card-kicker">BEM-VINDO DE VOLTA</div><h2>Aceder à plataforma</h2><p class="login-subtitle">Introduza as suas credenciais para continuar.</p>
+        {% for m in get_flashed_messages() %}<div class="error">{{m}}</div>{% endfor %}
+        <label class="login-label" for="username">Utilizador</label><div class="input-shell"><span class="field-icon">♙</span><input id="username" name="username" placeholder="O seu nome de utilizador" autocomplete="username" required autofocus></div>
+        <label class="login-label" for="password">Palavra-passe</label><div class="input-shell"><span class="field-icon">▣</span><input id="password" name="password" type="password" placeholder="Introduza a palavra-passe" autocomplete="current-password" required><button class="password-toggle" type="button" id="togglePassword" aria-label="Mostrar palavra-passe">◉</button></div>
+        <button class="login-submit" type="submit">Entrar <span>→</span></button><div class="login-note"><span>▣</span> O acesso é definido pelas permissões da sua instituição.</div>
+      </form>
+    </section>
+  </main>
+<script>document.getElementById('togglePassword').addEventListener('click',function(){const p=document.getElementById('password');const visible=p.type==='password';p.type=visible?'text':'password';this.setAttribute('aria-label',visible?'Ocultar palavra-passe':'Mostrar palavra-passe');this.textContent=visible?'◎':'◉';});</script>
+</body></html>

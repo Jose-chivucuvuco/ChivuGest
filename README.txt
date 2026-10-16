@@ -22,12 +22,8 @@ A lógica inicial considera a Lei n.º 41/20, de 23 de Dezembro — Lei dos Cont
 
 IMPORTANTE: os limites e regras legais podem ser alterados por OGE, regulamento ou diploma posterior. Por isso, os parâmetros críticos ficam gravados em LegalRule e podem ser atualizados no menu Configurações pelo administrador. O sistema é um mecanismo de apoio à conformidade e não substitui parecer jurídico, despacho do órgão competente, fiscalização do SNCP ou do Tribunal de Contas.
 
-PRIMEIRO ACESSO
-Utilizador: admin
-Senha: admin123
-
-ALTERAR A SENHA
-Antes de uso real, altere a senha inicial. Recomenda-se também implementar MFA, recuperação de senha e política de expiração de senha antes de produção crítica.
+PRIMEIRO ACESSO E SEGURANÇA
+Não existe palavra-passe padrão de produção. Configure INITIAL_ADMIN_PASSWORD (mínimo 10 caracteres) para criar o Gestor da instituição principal e SYSTEM_ADMIN_USERNAME / SYSTEM_ADMIN_PASSWORD (mínimo 12 caracteres) para provisionar o Administrador do Sistema. Use um gestor de segredos e nunca publique credenciais no repositório.
 
 DADOS / POSTGRESQL
 A versão usa PostgreSQL quando DATABASE_URL está definida. db.create_all() cria as novas tabelas sem apagar as tabelas existentes; a versão nova é aditiva para preservar os dados anteriores.
@@ -70,3 +66,12 @@ PERFIS DE ACESSO (actualização 2026-10-16)
 - Gestor: perfil com permissões de administrador, incluindo edição, eliminação, configurações, utilizadores, auditoria e backups.
 - Contas antigas com perfil 'user' são tratadas como Técnico; contas 'admin' continuam a entrar como Gestor.
 - Os bloqueios de permissões são aplicados no servidor e não dependem apenas de ocultar botões na interface.
+
+
+MULTI-INSTITUICAO E PERFIS (16/10/2026)
+- O sistema possui os perfis system_admin, institution_admin, technician e auditor.
+- Dados operacionais são associados a institution_id e filtrados no servidor.
+- O Administrador do Sistema cria/suspende instituições e gere backups globais; o Gestor só administra a instituição associada.
+- Configure SYSTEM_ADMIN_USERNAME e SYSTEM_ADMIN_PASSWORD (mínimo 12 caracteres) para criar o administrador da plataforma.
+- Configure INITIAL_ADMIN_PASSWORD (mínimo 10 caracteres) para criar o utilizador admin da instituição principal numa instalação nova.
+- Antes de publicar, faça backup e teste o isolamento com pelo menos duas instituições.
