@@ -2072,20 +2072,31 @@ def import_payment_documents():
         flash("Selecione um ficheiro para importar."); return redirect(url_for("supplier_payments"))
     try:
         filename=(f.filename or "").lower()
+        # Detectar automaticamente o Livro de OS pelo conteúdo do PDF, mesmo
+        # quando o utilizador deixou o seletor em DocFonte. Isto evita que o
+        # PDF seja tratado como um documento genérico e só gere um registo.
+        is_order_book = source_type_key in {"livro de ordens de saque", "livro de ordem de saque", "livro os", "livro de os"}
+        if filename.endswith(".pdf"):
+            pdf_bytes = f.read()
+            f.seek(0)
+            try:
+                import fitz
+                with fitz.open(stream=pdf_bytes, filetype="pdf") as _probe_pdf:
+                    _probe_text = " ".join(page.get_text("text") for page in _probe_pdf)
+                if re.search(r"livro\s+de\s+ordens?\s+de\s+saque", _probe_text, re.I):
+                    is_order_book = True
+                    source_type = "Livro de Ordens de Saque"
+                    source_type_key = "livro de ordens de saque"
+            except Exception:
+                pass
         created=0
         # Inicializar antes de qualquer ramo: ficheiros tratados pelo extrator
         # genérico também chegam às mensagens finais de importação.
         # Sem isto, a mensagem referia uma variável ainda não definida.
         excluded_non_company=0
         legacy_docfonte_orders_removed=0
-        # DocFonte é documento-fonte para análise/rastreabilidade; não cria OS/pagamento.
-        # Remove apenas OS legadas criadas pelo DocFonte por versões anteriores.
-        if source_type_key == "docfonte":
-            legacy_docfonte_orders_removed = PaymentOrder.query.filter(
-                func.lower(PaymentOrder.source_type) == "docfonte"
-            ).delete(synchronize_session=False)
-            db.session.commit()
-        is_order_book = source_type_key in {"livro de ordens de saque", "livro de ordem de saque", "livro os", "livro de os"}
+        # Nunca apagar OS legadas automaticamente ao importar DocFonte: a limpeza
+        # é uma ação administrativa explícita e não deve ocorrer como efeito lateral.
         if filename.endswith((".csv", ".xlsx")) or (is_order_book and filename.endswith(".pdf")):
             # Read the upload once. Reusing the bytes avoids repeated getvalue()/stream
             # operations for every row and keeps large DocFonte imports predictable.
@@ -2216,7 +2227,7 @@ def import_payment_documents():
                 # This ChivuGest import is for enterprise/supplier data only.
                 # Payroll, salaries and travel allowances must never become
                 # suppliers, invoices or payment orders.
-                if not _is_company_docfonte_row(r):
+                if source_type_key == "docfonte" and not _is_company_docfonte_row(r):
                     excluded_non_company += 1
                     continue
                 beneficiary = str(row_value(r,"fornecedor","supplier","emitente","beneficiario") or "").strip()
@@ -2232,10 +2243,17 @@ def import_payment_documents():
                 finalidade = str(row_value(r,"finalidade_os","finalidade_da_os","finalidade") or "").strip()
                 invoice_number = str(row_value(r,"fatura","factura","numero_fatura","invoice_number") or "").strip()
                 if not invoice_number and finalidade:
-                    invoice_number = _extract_invoice_number(finalidade) or regex_first(finalidade, [
-                        r"\b(?:fatura|factura|ft\.?|fa\.)\s*(?:n\s*[.ºo°]*|no|número|numero)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9./_-]+)",
-                        r"(?:n\s*[.ºo°]+|n[ºo°]|no|número|numero)\s*[:#-]?\s*([A-Z0-9][A-Z0-9./_-]{2,})"
-                    ])
+                    if is_order_book:
+                        # No Livro de OS, Finalidade é apenas auxiliar: só extrair
+                        # um número quando houver indicação explícita de Fatura/Factura.
+                        invoice_number = regex_first(finalidade, [
+                            r"\b(?:fatura|factura|ft\.?|fa\.)\s*(?:n\s*[.ºo°]*|no|número|numero)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9./_-]+)"
+                        ])
+                    else:
+                        invoice_number = _extract_invoice_number(finalidade) or regex_first(finalidade, [
+                            r"\b(?:fatura|factura|ft\.?|fa\.)\s*(?:n\s*[.ºo°]*|no|número|numero)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9./_-]+)",
+                            r"(?:n\s*[.ºo°]+|n[ºo°]|no|número|numero)\s*[:#-]?\s*([A-Z0-9][A-Z0-9./_-]{2,})"
+                        ])
 
                 # DocFonte: a data efectiva é a Data da Confirmação de Pagamento;
                 # nunca substituir pela data de emissão da Ordem de Saque.
