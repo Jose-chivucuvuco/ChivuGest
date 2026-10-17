@@ -3854,18 +3854,50 @@ def system_institutions():
         admin_name = (request.form.get("admin_name") or "").strip()
         username = (request.form.get("username") or "").strip()
         password = request.form.get("password") or ""
+        nif = (request.form.get("nif") or "").strip()
+
+        # Validar cada campo antes de gravar, para indicar a causa concreta
+        # e evitar que um IntegrityError apresente apenas uma mensagem genérica.
         if not name or not code or not admin_name or not username or len(password) < 10:
             flash("Preencha os dados da instituição e do Gestor. A palavra-passe inicial deve ter pelo menos 10 caracteres.")
         else:
-            try:
-                inst = Institution(name=name, code=code, nif=(request.form.get("nif") or "").strip(), active=True)
-                db.session.add(inst); db.session.flush()
-                db.session.add(InstitutionProfile(institution_id=inst.id, institution_name=name, nif=inst.nif or ""))
-                db.session.add(User(name=admin_name, username=username, password_hash=generate_password_hash(password), role="institution_admin", active=True, institution_id=inst.id))
-                db.session.commit()
-                flash("Instituição criada com o seu Gestor institucional.")
-            except IntegrityError:
-                db.session.rollback(); flash("Código, nome de instituição ou utilizador já existente.")
+            duplicate_messages = []
+            if Institution.query.filter(func.lower(Institution.name) == name.lower()).first():
+                duplicate_messages.append("o nome da instituição")
+            if Institution.query.filter(func.upper(Institution.code) == code.upper()).first():
+                duplicate_messages.append("o código da instituição")
+            if User.query.filter(func.lower(User.username) == username.lower()).first():
+                duplicate_messages.append("o nome de utilizador do Gestor")
+
+            if duplicate_messages:
+                flash("Já existe: " + ", ".join(duplicate_messages) + ". Use valores únicos e tente novamente.")
+            else:
+                try:
+                    inst = Institution(name=name, code=code, nif=nif, active=True)
+                    db.session.add(inst)
+                    db.session.flush()
+                    db.session.add(InstitutionProfile(
+                        institution_id=inst.id,
+                        institution_name=name,
+                        nif=nif or ""
+                    ))
+                    db.session.add(User(
+                        name=admin_name,
+                        username=username,
+                        password_hash=generate_password_hash(password),
+                        role="institution_admin",
+                        active=True,
+                        institution_id=inst.id
+                    ))
+                    db.session.commit()
+                    flash("Instituição criada com o seu Gestor institucional.")
+                except IntegrityError:
+                    db.session.rollback()
+                    flash("Não foi possível criar a instituição porque um dos dados únicos já existe. Confirme o nome, o código e o utilizador; se persistir, verifique os registos existentes na base de dados.")
+                except Exception as e:
+                    db.session.rollback()
+                    app.logger.exception("Erro ao criar instituição e Gestor inicial")
+                    flash("Ocorreu um erro ao criar a instituição. Consulte os registos técnicos do sistema.")
     rows = Institution.query.order_by(Institution.name).all()
     return render_template("system_institutions.html", rows=rows)
 
