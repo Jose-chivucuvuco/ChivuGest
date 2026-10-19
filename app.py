@@ -3848,7 +3848,7 @@ def admin_delete(model, record_id):
 @login_required
 @system_admin_required
 def system_users():
-    rows = User.query.order_by(User.name).all()
+    rows = User.query.execution_options(skip_tenant_scope=True).order_by(User.name).all()
     institutions = {i.id: i.name for i in Institution.query.order_by(Institution.name).all()}
     return render_template("system_users.html", rows=rows, institutions=institutions)
 
@@ -3857,7 +3857,7 @@ def system_users():
 @login_required
 @system_admin_required
 def system_edit_user(uid):
-    user = db.session.get(User, uid)
+    user = User.query.execution_options(skip_tenant_scope=True).filter_by(id=uid).first()
     if not user:
         flash("Utilizador não encontrado.")
         return redirect(url_for("system_users"))
@@ -3876,7 +3876,7 @@ def system_edit_user(uid):
             flash("Perfil inválido.")
         elif not institution_raw.isdigit() or not db.session.get(Institution, int(institution_raw)):
             flash("Seleccione uma instituição válida.")
-        elif User.query.filter(func.lower(User.username) == username.lower(), User.id != user.id).first():
+        elif User.query.execution_options(skip_tenant_scope=True).filter(func.lower(User.username) == username.lower(), User.id != user.id).first():
             flash("Esse nome de utilizador já está em uso.")
         else:
             try:
@@ -3898,7 +3898,7 @@ def system_edit_user(uid):
 @login_required
 @system_admin_required
 def system_reset_user_password(uid):
-    user = db.session.get(User, uid)
+    user = User.query.execution_options(skip_tenant_scope=True).filter_by(id=uid).first()
     if not user:
         flash("Utilizador não encontrado.")
         return redirect(url_for("system_users"))
@@ -3927,7 +3927,7 @@ def system_reset_user_password(uid):
 @login_required
 @system_admin_required
 def system_delete_user(uid):
-    user = db.session.get(User, uid)
+    user = User.query.execution_options(skip_tenant_scope=True).filter_by(id=uid).first()
     if not user:
         flash("Utilizador não encontrado.")
     elif user.id == session.get("uid") or user.role == "system_admin":
@@ -3953,7 +3953,7 @@ def system_delete_user(uid):
 @login_required
 @system_admin_required
 def system_toggle_user(uid):
-    user = db.session.get(User, uid)
+    user = User.query.execution_options(skip_tenant_scope=True).filter_by(id=uid).first()
     if not user:
         flash("Utilizador não encontrado.")
     elif user.id == session.get("uid") or user.role == "system_admin":
@@ -3988,7 +3988,7 @@ def system_institutions():
                 duplicate_messages.append("o nome da instituição")
             if Institution.query.filter(func.upper(Institution.code) == code.upper()).first():
                 duplicate_messages.append("o código da instituição")
-            if User.query.filter(func.lower(User.username) == username.lower()).first():
+            if User.query.execution_options(skip_tenant_scope=True).filter(func.lower(User.username) == username.lower()).first():
                 duplicate_messages.append("o nome de utilizador do Gestor")
 
             if duplicate_messages:
@@ -4073,6 +4073,75 @@ def system_edit_institution(institution_id):
         flash("Identificação institucional atualizada.")
         return redirect(url_for("system_institutions"))
     return render_template("system_institution_edit.html", inst=inst, profile=profile)
+
+
+@app.route("/system/institutions/<int:institution_id>/delete", methods=["POST"])
+@login_required
+@system_admin_required
+def system_delete_institution(institution_id):
+    """Delete an unused institution without deleting operational/financial history."""
+    inst = db.session.get(Institution, institution_id)
+    if not inst:
+        flash("Instituição não encontrada.")
+        return redirect(url_for("system_institutions"))
+    if inst.code == "DEFAULT":
+        flash("A Instituição Principal não pode ser eliminada.")
+        return redirect(url_for("system_institutions"))
+
+    # Refuse deletion if operational data exists. Users, profile and audit history
+    # are handled separately; financial/contract/import records are never cascaded.
+    protected_models = [Client, Invoice, Payment, FrameworkAgreement, Supplier,
+        ProcurementProcedure, Contract, SupplierInvoice, SupplierPayment,
+        PaymentOrder, SourceDocument, ImportBatch, ComplianceAlert, BackupRecord]
+    populated = []
+    inspector = inspect(db.engine)
+    available_tables = set(inspector.get_table_names())
+    for model in protected_models:
+        table = model.__tablename__
+        if table not in available_tables:
+            continue
+        columns = {col["name"] for col in inspector.get_columns(table)}
+        if "institution_id" not in columns:
+            continue
+        try:
+            count = db.session.execute(
+                text(f'SELECT COUNT(*) FROM "{table}" WHERE institution_id = :iid'),
+                {"iid": inst.id}
+            ).scalar() or 0
+            if count:
+                populated.append(f"{table} ({count})")
+        except Exception:
+            db.session.rollback()
+            app.logger.exception("Falha ao verificar dados dependentes da instituição %s", inst.id)
+            flash("Não foi possível verificar todos os dados associados. A instituição não foi eliminada; consulte os logs técnicos.")
+            return redirect(url_for("system_institutions"))
+
+    if populated:
+        flash("A instituição não pode ser eliminada porque tem dados associados: " + ", ".join(populated) + ". Preserve os registos; suspenda a instituição se já não for utilizada.")
+        return redirect(url_for("system_institutions"))
+
+    try:
+        linked_users = User.query.execution_options(skip_tenant_scope=True).filter_by(institution_id=inst.id).all()
+        linked_user_ids = [u.id for u in linked_users]
+        # Preserve the audit trail while detaching references to the institution/users being removed.
+        audit_query = AuditLog.query.execution_options(skip_tenant_scope=True).filter_by(institution_id=inst.id)
+        for log in audit_query.all():
+            log.institution_id = None
+            log.details = ((log.details or "") + " [Instituição associada eliminada pelo Administrador do Sistema]").strip()
+        if linked_user_ids:
+            AuditLog.query.execution_options(skip_tenant_scope=True).filter(AuditLog.user_id.in_(linked_user_ids)).update({AuditLog.user_id: None}, synchronize_session=False)
+            for user in linked_users:
+                db.session.delete(user)
+        InstitutionProfile.query.execution_options(skip_tenant_scope=True).filter_by(institution_id=inst.id).delete(synchronize_session=False)
+        db.session.delete(inst)
+        db.session.commit()
+        audit("INSTITUTION_DELETE", "Institution", institution_id, "Instituição eliminada sem dados operacionais associados")
+        flash("Instituição eliminada. Os registos financeiros e contratuais não foram apagados.")
+    except Exception:
+        db.session.rollback()
+        app.logger.exception("Erro ao eliminar instituição %s", institution_id)
+        flash("Não foi possível eliminar a instituição. Nenhuma eliminação foi confirmada; consulte os logs técnicos.")
+    return redirect(url_for("system_institutions"))
 
 
 @app.route("/system/institutions/<int:institution_id>/toggle", methods=["POST"])
