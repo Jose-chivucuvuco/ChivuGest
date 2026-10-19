@@ -4126,6 +4126,35 @@ def ensure_schema():
     """Additive migration: tenant ownership and safe legacy-data assignment."""
     inspector = inspect(db.engine)
     tables = set(inspector.get_table_names())
+
+    # Repair legacy PostgreSQL databases where institution_profile.id is a
+    # NOT NULL primary key but has lost its SERIAL/IDENTITY default. The
+    # INSERT statements intentionally omit id and rely on PostgreSQL to
+    # generate it. This migration is idempotent and preserves existing rows.
+    if db.engine.dialect.name == "postgresql" and "institution_profile" in tables:
+        with db.engine.begin() as conn:
+            conn.execute(text(
+                "CREATE SEQUENCE IF NOT EXISTS public.institution_profile_id_seq"
+            ))
+            conn.execute(text(
+                "ALTER SEQUENCE public.institution_profile_id_seq "
+                "OWNED BY public.institution_profile.id"
+            ))
+            conn.execute(text(
+                "ALTER TABLE public.institution_profile "
+                "ALTER COLUMN id SET DEFAULT "
+                "nextval('public.institution_profile_id_seq'::regclass)"
+            ))
+            # Align the sequence with the largest existing ID so new inserts
+            # do not collide with legacy records. Empty tables start at 1.
+            conn.execute(text("""
+                SELECT setval(
+                    'public.institution_profile_id_seq',
+                    COALESCE((SELECT MAX(id) FROM public.institution_profile), 1),
+                    EXISTS(SELECT 1 FROM public.institution_profile)
+                )
+            """))
+
     # Create a default institution and attach existing single-tenant data to it.
     default_inst = Institution.query.filter_by(code="DEFAULT").first()
     if not default_inst:
