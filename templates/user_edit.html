@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="pagehead"><div><h1>Editar utilizador</h1><p class="muted">Actualize os dados de acesso. A palavra-passe é alterada separadamente por segurança.</p></div></div>
+<div class="panel" style="max-width:760px">
+  <form method="post" class="form">
+    <label>Nome completo<input name="name" value="{{ user.name }}" maxlength="150" required></label>
+    <label>Nome de utilizador<input name="username" value="{{ user.username }}" maxlength="80" required></label>
+    <label>Perfil de acesso<select name="role" required>
+      <option value="technician" {{ 'selected' if user.role == 'technician' else '' }}>Técnico — registar e consultar</option>
+      <option value="institution_admin" {{ 'selected' if user.role == 'institution_admin' else '' }}>Gestor institucional</option>
+      <option value="auditor" {{ 'selected' if user.role == 'auditor' else '' }}>Consulta/Auditoria — leitura</option>
+    </select></label>
+    {% if system_mode %}
+    <label>Instituição<select name="institution_id" required><option value="">Seleccione a instituição</option>{% for inst in institutions %}<option value="{{ inst.id }}" {{ 'selected' if user.institution_id == inst.id else '' }}>{{ inst.name }} ({{ inst.code }})</option>{% endfor %}</select></label>
+    {% else %}<p class="muted">Instituição: {{ session.institution_name or 'Instituição actual' }}. Para alterar a senha, use a acção separada na lista de utilizadores.</p>{% endif %}
+    <div class="actions" style="grid-column:1/-1"><button type="submit">Guardar alterações</button><a class="btn secondary" href="{{ '/system/users' if system_mode else '/users' }}">Cancelar</a></div>
+  </form>
+</div>
+{% endblock %}

@@ -17,7 +17,8 @@
     <nav class="main-nav" aria-label="Navegação principal">
       {% if session.role == 'system_admin' %}
         <div class="navgroup">PLATAFORMA</div>
-        <a class="{{ 'active' if request.path.startswith('/system') else '' }}" href="/system/institutions"><span class="nav-icon">▦</span><span>Instituições</span></a>
+        <a class="{{ 'active' if request.path.startswith('/system/institutions') else '' }}" href="/system/institutions"><span class="nav-icon">▦</span><span>Instituições</span></a>
+        <a class="{{ 'active' if request.path.startswith('/system/users') else '' }}" href="/system/users"><span class="nav-icon">♙</span><span>Utilizadores da plataforma</span></a>
         <a class="{{ 'active' if request.path == '/legal' else '' }}" href="/legal"><span class="nav-icon">⚖</span><span>Base legal global</span></a>
         <a class="{{ 'active' if request.path.startswith('/admin/backup') else '' }}" href="/admin/backup"><span class="nav-icon">▣</span><span>Backup global</span></a>
       {% else %}

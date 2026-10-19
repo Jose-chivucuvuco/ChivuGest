@@ -3844,6 +3844,128 @@ def admin_delete(model, record_id):
         db.session.rollback(); flash("Erro ao eliminar: "+str(e))
     return redirect(url_for("admin_data"))
 
+@app.route("/system/users", methods=["GET"])
+@login_required
+@system_admin_required
+def system_users():
+    rows = User.query.order_by(User.name).all()
+    institutions = {i.id: i.name for i in Institution.query.order_by(Institution.name).all()}
+    return render_template("system_users.html", rows=rows, institutions=institutions)
+
+
+@app.route("/system/users/<int:uid>/edit", methods=["GET", "POST"])
+@login_required
+@system_admin_required
+def system_edit_user(uid):
+    user = db.session.get(User, uid)
+    if not user:
+        flash("Utilizador não encontrado.")
+        return redirect(url_for("system_users"))
+    if user.role == "system_admin":
+        flash("A conta do Administrador do Sistema não pode ser editada por esta página. Utilize Alterar senha para a sua própria conta.")
+        return redirect(url_for("system_users"))
+    institutions = Institution.query.order_by(Institution.name).all()
+    if request.method == "POST":
+        name = (request.form.get("name") or "").strip()
+        username = (request.form.get("username") or "").strip()
+        role = (request.form.get("role") or "technician").strip()
+        institution_raw = (request.form.get("institution_id") or "").strip()
+        if not name or not username:
+            flash("O nome e o nome de utilizador são obrigatórios.")
+        elif role not in ("technician", "institution_admin", "auditor"):
+            flash("Perfil inválido.")
+        elif not institution_raw.isdigit() or not db.session.get(Institution, int(institution_raw)):
+            flash("Seleccione uma instituição válida.")
+        elif User.query.filter(func.lower(User.username) == username.lower(), User.id != user.id).first():
+            flash("Esse nome de utilizador já está em uso.")
+        else:
+            try:
+                user.name = name
+                user.username = username
+                user.role = role
+                user.institution_id = int(institution_raw)
+                db.session.commit()
+                audit("USER_UPDATE", "User", user.id, "Utilizador atualizado pelo Administrador do Sistema")
+                flash("Utilizador atualizado com sucesso.")
+                return redirect(url_for("system_users"))
+            except IntegrityError:
+                db.session.rollback()
+                flash("Não foi possível guardar. Confirme o nome de utilizador e a instituição.")
+    return render_template("user_edit.html", user=user, system_mode=True, institutions=institutions)
+
+
+@app.route("/system/users/<int:uid>/password", methods=["GET", "POST"])
+@login_required
+@system_admin_required
+def system_reset_user_password(uid):
+    user = db.session.get(User, uid)
+    if not user:
+        flash("Utilizador não encontrado.")
+        return redirect(url_for("system_users"))
+    if user.role == "system_admin":
+        flash("Para a sua própria conta, utilize Alterar senha no cabeçalho.")
+        return redirect(url_for("system_users"))
+    if request.method == "POST":
+        new_password = request.form.get("new_password", "")
+        confirm = request.form.get("confirm_password", "")
+        if len(new_password) < 10:
+            flash("A nova palavra-passe deve ter pelo menos 10 caracteres.")
+        elif not re.search(r"[A-Z]", new_password) or not re.search(r"[a-z]", new_password) or not re.search(r"\d", new_password):
+            flash("A nova palavra-passe deve conter uma maiúscula, uma minúscula e um número.")
+        elif new_password != confirm:
+            flash("A confirmação da nova palavra-passe não coincide.")
+        else:
+            user.password_hash = generate_password_hash(new_password)
+            db.session.commit()
+            audit("USER_PASSWORD_RESET", "User", user.id, "Palavra-passe redefinida pelo Administrador do Sistema")
+            flash("Palavra-passe redefinida com sucesso.")
+            return redirect(url_for("system_users"))
+    return render_template("reset_password.html", user=user, system_mode=True)
+
+
+@app.route("/system/users/<int:uid>/delete", methods=["POST"])
+@login_required
+@system_admin_required
+def system_delete_user(uid):
+    user = db.session.get(User, uid)
+    if not user:
+        flash("Utilizador não encontrado.")
+    elif user.id == session.get("uid") or user.role == "system_admin":
+        flash("A conta do Administrador do Sistema não pode ser eliminada por esta operação.")
+    else:
+        try:
+            user_id, username = user.id, user.username
+            db.session.delete(user)
+            db.session.commit()
+            audit("USER_DELETE", "User", user_id, f"Utilizador {username} eliminado pelo Administrador do Sistema")
+            flash("Utilizador eliminado com sucesso.")
+        except IntegrityError:
+            db.session.rollback()
+            flash("Este utilizador tem registos relacionados. Desactive a conta para retirar o acesso sem comprometer o histórico.")
+        except Exception:
+            db.session.rollback()
+            app.logger.exception("Erro ao eliminar utilizador na administração global")
+            flash("Não foi possível eliminar o utilizador. Consulte os registos técnicos.")
+    return redirect(url_for("system_users"))
+
+
+@app.route("/system/users/<int:uid>/toggle", methods=["POST"])
+@login_required
+@system_admin_required
+def system_toggle_user(uid):
+    user = db.session.get(User, uid)
+    if not user:
+        flash("Utilizador não encontrado.")
+    elif user.id == session.get("uid") or user.role == "system_admin":
+        flash("A conta do Administrador do Sistema não pode ser alterada por esta operação.")
+    else:
+        user.active = not user.active
+        db.session.commit()
+        audit("USER_TOGGLE", "User", user.id, "Estado do utilizador alterado pelo Administrador do Sistema")
+        flash("Estado do utilizador atualizado.")
+    return redirect(url_for("system_users"))
+
+
 @app.route("/system/institutions", methods=["GET", "POST"])
 @login_required
 @system_admin_required
@@ -3984,6 +4106,55 @@ def users():
             db.session.commit(); flash("Utilizador criado.")
         except IntegrityError: db.session.rollback(); flash("Nome de utilizador já existe.")
     return render_template("users.html", rows=User.query.order_by(User.name).all())
+
+@app.route("/users/edit/<int:uid>", methods=["GET", "POST"])
+@login_required
+@admin_required
+def edit_user(uid):
+    user = db.session.get(User, uid)
+    if not user:
+        flash("Utilizador não encontrado.")
+        return redirect(url_for("users"))
+    if session.get("role") != "system_admin" and user.institution_id != session.get("institution_id"):
+        flash("Não tem autorização para editar utilizadores de outra instituição.")
+        return redirect(url_for("users"))
+    if user.role == "system_admin":
+        flash("A conta do Administrador do Sistema só pode ser gerida pelo próprio.")
+        return redirect(url_for("users"))
+    if request.method == "POST":
+        name = (request.form.get("name") or "").strip()
+        username = (request.form.get("username") or "").strip()
+        role = (request.form.get("role") or user.role).strip()
+        allowed_roles = ("technician", "institution_admin", "auditor")
+        if not name or not username:
+            flash("O nome e o nome de utilizador são obrigatórios.")
+        elif role not in allowed_roles:
+            flash("Perfil inválido.")
+        elif user.id == session.get("uid") and role != user.role:
+            flash("Não pode alterar o seu próprio perfil de acesso.")
+        elif role == "institution_admin" and user.role != "institution_admin" and session.get("role") != "system_admin":
+            flash("A criação ou promoção de Gestores institucionais está reservada ao Administrador do Sistema.")
+        elif role == "institution_admin" and user.id != session.get("uid") and session.get("role") != "system_admin":
+            flash("A gestão de outros Gestores institucionais está reservada ao Administrador do Sistema.")
+        else:
+            duplicate = User.query.filter(func.lower(User.username) == username.lower(), User.id != user.id).first()
+            if duplicate:
+                flash("Esse nome de utilizador já está em uso.")
+            else:
+                try:
+                    user.name = name
+                    user.username = username
+                    if user.id != session.get("uid") or role == user.role:
+                        user.role = role
+                    db.session.commit()
+                    audit("USER_UPDATE", "User", user.id, "Dados do utilizador atualizados")
+                    flash("Dados do utilizador atualizados com sucesso.")
+                    return redirect(url_for("users"))
+                except IntegrityError:
+                    db.session.rollback()
+                    flash("Não foi possível guardar. Confirme se o nome de utilizador já existe.")
+    return render_template("user_edit.html", user=user, system_mode=False)
+
 
 @app.route("/change-password", methods=["GET", "POST"])
 @login_required

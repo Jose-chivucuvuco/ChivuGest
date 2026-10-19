@@ -22,7 +22,8 @@
       <td>{{u.name}}</td><td>{{u.username}}</td><td>{{ "Gestor institucional" if u.role in ["admin", "gestor", "institution_admin"] else ("Consulta/Auditoria" if u.role == "auditor" else "Técnico (registo sem edição)") }}</td>
       <td>{{"Ativo" if u.active else "Inativo"}}</td>
       <td class="actions">
-        <a class="btn small secondary" href="/users/reset-password/{{u.id}}">🔐 Redefinir palavra-passe</a>
+        <a class="btn small secondary" href="/users/edit/{{u.id}}">✏️ Editar utilizador</a>
+        <a class="btn small secondary" href="/users/reset-password/{{u.id}}">🔐 Alterar/redefinir senha</a>
         {% if u.id != session.uid %}<form method="post" action="/users/toggle/{{u.id}}" style="display:inline"><button class="btn small secondary" type="submit">{{ "Desativar" if u.active else "Ativar" }}</button></form>
         {% if u.role not in ["system_admin", "institution_admin"] or session.role == "system_admin" %}<form method="post" action="/users/delete/{{u.id}}" style="display:inline" onsubmit="return confirm('Confirma a eliminação deste utilizador? Esta operação não pode ser desfeita.')"><button class="btn small" type="submit">Eliminar</button></form>{% endif %}{% endif %}
       </td>
