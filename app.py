@@ -469,7 +469,15 @@ def login_required(f):
         if not session.get("uid"):
             return redirect(url_for("login"))
 
-        u = db.session.get(User, session["uid"])
+        app.logger.warning(
+            "LOGIN_DIAG: uid presente=%s",
+            bool(session.get("uid"))
+        )
+        # Authentication lookup must bypass tenant query scoping: the tenant
+        # filter is for business data, not for resolving the authenticated user.
+        u = User.query.execution_options(skip_tenant_scope=True).filter_by(
+            id=session["uid"]
+        ).first()
         if not u:
             app.logger.warning("LOGIN_DIAG: utilizador não encontrado na base de dados")
             session.clear()
