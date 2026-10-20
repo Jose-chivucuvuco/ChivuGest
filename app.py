@@ -488,6 +488,15 @@ def login_required(f):
             session.clear()
             return redirect(url_for("login"))
 
+        # Never trust a tenant identifier in the session without checking it
+        # against the authenticated user's institution assignment.
+        if u.role != "system_admin":
+            session_tenant_id = session.get("institution_id")
+            if session_tenant_id is None or u.institution_id is None or str(session_tenant_id) != str(u.institution_id):
+                app.logger.warning("TENANT_SECURITY: instituição da sessão não corresponde ao utilizador")
+                session.clear()
+                return redirect(url_for("login"))
+
         if u.role != "system_admin" and not session.get("institution_id"):
             app.logger.warning("LOGIN_DIAG: falta institution_id na sessão")
             session.clear()
@@ -520,16 +529,38 @@ def system_admin_required(f):
 
 @event.listens_for(SQLAlchemySession, "do_orm_execute")
 def _apply_tenant_query_scope(execute_state):
-    # Platform-level institution management is not tenant-filtered. Business
-    # routes are blocked for system admins unless an explicit support context is set.
+    # Explicitly global platform operations must opt out on the specific query.
     if execute_state.execution_options.get("skip_tenant_scope"):
         return
+
     tenant_id = _current_tenant_id()
-    if tenant_id is None:
-        return
     stmt = execute_state.statement
+
+    if tenant_id is None:
+        # Fail closed: a request without an authenticated institution must never
+        # receive unscoped operational data. The login endpoint is the sole
+        # exception because it must locate an account before a tenant is known.
+        if not _has_request_context() or request.endpoint == "login":
+            return
+        for model in TENANT_MODELS:
+            stmt = stmt.options(
+                with_loader_criteria(
+                    model,
+                    lambda cls: cls.institution_id == -1,
+                    include_aliases=True,
+                )
+            )
+        execute_state.statement = stmt
+        return
+
     for model in TENANT_MODELS:
-        stmt = stmt.options(with_loader_criteria(model, lambda cls, tid=tenant_id: cls.institution_id == tid, include_aliases=True))
+        stmt = stmt.options(
+            with_loader_criteria(
+                model,
+                lambda cls, tid=tenant_id: cls.institution_id == tid,
+                include_aliases=True,
+            )
+        )
     execute_state.statement = stmt
 
 
@@ -1952,7 +1983,10 @@ def audit_center():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        u = User.query.filter_by(username=request.form.get("username", "").strip()).first()
+        # Login must locate the account globally; tenant scoping begins after authentication.
+        u = User.query.execution_options(skip_tenant_scope=True).filter_by(
+            username=request.form.get("username", "").strip()
+        ).first()
         if u and u.active and check_password_hash(u.password_hash, request.form.get("password", "")):
             normalized = {"admin": "institution_admin", "gestor": "institution_admin", "user": "technician"}.get(u.role, u.role)
             if normalized != "system_admin" and not u.institution_id:
