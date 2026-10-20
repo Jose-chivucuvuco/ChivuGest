@@ -470,8 +470,13 @@ def login_required(f):
             return redirect(url_for("login"))
 
         u = db.session.get(User, session["uid"])
-        if not u or not u.active:
-            app.logger.warning("LOGIN_DIAG: utilizador inexistente ou inactivo")
+        if not u:
+            app.logger.warning("LOGIN_DIAG: utilizador não encontrado na base de dados")
+            session.clear()
+            return redirect(url_for("login"))
+
+        if not u.active:
+            app.logger.warning("LOGIN_DIAG: utilizador encontrado mas inactivo")
             session.clear()
             return redirect(url_for("login"))
 
