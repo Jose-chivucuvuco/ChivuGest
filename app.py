@@ -557,7 +557,7 @@ def _apply_tenant_query_scope(execute_state):
         stmt = stmt.options(
             with_loader_criteria(
                 model,
-                lambda cls, tid=tenant_id: cls.institution_id == tid,
+                lambda cls: cls.institution_id == tenant_id,
                 include_aliases=True,
             )
         )
