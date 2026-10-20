@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="pt">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{% block title %}ChivuGest{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="app-shell">
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="ChivuGest - início">
+      {% if institution_profile and institution_profile.logo_filename %}
+        <img class="brand-logo" src="{{ url_for('static', filename='uploads/' ~ institution_profile.logo_filename) }}" alt="Logótipo institucional">
+      {% else %}<span class="brand-mark">CG</span>{% endif %}
+      <span class="brand-copy"><strong>{{ session.institution_name or 'ChivuGest' }}</strong><small>Gestão financeira e contratação</small></span>
+    </a>
+    <div class="workspace-label"><span class="workspace-dot"></span> Área de trabalho</div>
+    <nav class="main-nav" aria-label="Navegação principal">
+      {% if session.role == 'system_admin' %}
+        <div class="navgroup">PLATAFORMA</div>
+        <a class="{{ 'active' if request.path.startswith('/system/institutions') else '' }}" href="/system/institutions"><span class="nav-icon">▦</span><span>Instituições</span></a>
+        <a class="{{ 'active' if request.path.startswith('/system/users') else '' }}" href="/system/users"><span class="nav-icon">♙</span><span>Utilizadores da plataforma</span></a>
+        <a class="{{ 'active' if request.path == '/legal' else '' }}" href="/legal"><span class="nav-icon">⚖</span><span>Base legal global</span></a>
+        <a class="{{ 'active' if request.path.startswith('/admin/backup') else '' }}" href="/admin/backup"><span class="nav-icon">▣</span><span>Backup global</span></a>
+      {% else %}
+        <div class="navgroup">PRINCIPAL</div>
+        <a class="{{ 'active' if request.path == '/' else '' }}" href="/"><span class="nav-icon">▦</span><span>Painel de controlo</span></a>
+        {% if session.role != 'auditor' %}
+          <div class="navgroup">GESTÃO FINANCEIRA</div>
+          <a class="{{ 'active' if request.path.startswith('/suppliers') else '' }}" href="/suppliers"><span class="nav-icon">♙</span><span>Fornecedores</span></a>
+          <a class="{{ 'active' if request.path.startswith('/invoices') else '' }}" href="/invoices"><span class="nav-icon">▤</span><span>Faturas</span></a>
+          <a class="{{ 'active' if request.path.startswith('/payments') else '' }}" href="/payments"><span class="nav-icon">⇄</span><span>Pagamentos</span></a>
+        {% endif %}
+        <a class="{{ 'active' if request.path.startswith('/current') else '' }}" href="/current"><span class="nav-icon">↔</span><span>Conta corrente</span></a>
+        {% if session.role in ['institution_admin','admin','gestor'] %}
+          <div class="navgroup">CONTRATAÇÃO PÚBLICA</div>
+          <a class="{{ 'active' if request.path.startswith('/procurement') else '' }}" href="/procurement"><span class="nav-icon">⚖</span><span>Contratação pública</span></a>
+          <a class="{{ 'active' if request.path.startswith('/framework-agreements') else '' }}" href="/framework-agreements"><span class="nav-icon">▧</span><span>Acordos-Quadro</span></a>
+          <a class="{{ 'active' if request.path.startswith('/contracts') else '' }}" href="/contracts"><span class="nav-icon">▤</span><span>Contratos</span></a>
+          <a class="{{ 'active' if request.path.startswith('/alerts') else '' }}" href="/alerts"><span class="nav-icon">⚑</span><span>Alertas</span></a>
+        {% endif %}
+        {% if session.role in ['institution_admin','admin','gestor','technician','user'] %}
+          <div class="navgroup">ANÁLISE E DOCUMENTOS</div>
+          <a class="{{ 'active' if request.path.startswith('/supplier-analysis') else '' }}" href="/supplier-analysis"><span class="nav-icon">▥</span><span>Análise por empresas</span></a>
+          <a class="{{ 'active' if request.path.startswith('/reports') else '' }}" href="/reports"><span class="nav-icon">▤</span><span>Relatórios</span></a>
+          <a class="{{ 'active' if request.path.startswith('/import') else '' }}" href="/import"><span class="nav-icon">⇧</span><span>Importação de dados</span></a>
+        {% endif %}
+        {% if session.role in ['institution_admin','admin','gestor'] %}
+          <div class="navgroup">ADMINISTRAÇÃO</div>
+          <a class="{{ 'active' if request.path.startswith('/users') else '' }}" href="/users"><span class="nav-icon">♙</span><span>Utilizadores</span></a>
+          <a class="{{ 'active' if request.path.startswith('/admin/data') else '' }}" href="/admin/data"><span class="nav-icon">⚙</span><span>Administração de dados</span></a>
+          <a class="{{ 'active' if request.path.startswith('/settings') else '' }}" href="/settings"><span class="nav-icon">⚙</span><span>Configurações</span></a>
+          <a class="{{ 'active' if request.path.startswith('/admin/audit') else '' }}" href="/admin/audit"><span class="nav-icon">◉</span><span>Auditoria</span></a>
+        {% endif %}
+        {% if session.role in ['institution_admin','admin','gestor','auditor'] %}
+          <a class="{{ 'active' if request.path == '/legal' else '' }}" href="/legal"><span class="nav-icon">⚖</span><span>Base legal</span></a>
+        {% endif %}
+      {% endif %}
+    </nav>
+    <div class="sidebar-footer"><span class="footer-lock">▣</span><span><b>Espaço protegido</b><small>Dados da instituição</small></span></div>
+  </aside>
+  <main class="main-area">
+    <header class="topbar">
+      <div class="topbar-title"><span class="eyebrow">CHIVUGEST · GESTÃO INTEGRADA</span><strong>{{ session.institution_name or 'Administração da plataforma' }}</strong></div>
+      <div class="topbar-actions"><div class="userpill"><span class="avatar">{{ (session.name or 'U')[:1]|upper }}</span><span class="user-meta"><b>{{ session.name }}</b><small>{{ role_labels.get(session.role, session.role) }}</small></span></div><a class="topbar-link" href="/change-password">🔐 <span>Alterar senha</span></a><a class="topbar-link logout-link" href="/logout">↪ <span>Sair</span></a></div>
+    </header>
+    <div class="content-wrap">
+      {% for m in get_flashed_messages() %}<div class="alert">{{m}}</div>{% endfor %}
+      {% block content %}{% endblock %}
+      <footer class="app-footer"><span>ChivuGest · Gestão financeira e contratação</span><span>Ambiente institucional protegido</span></footer>
+    </div>
+  </main>
+</body>
+</html>

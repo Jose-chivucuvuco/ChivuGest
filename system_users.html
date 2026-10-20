@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="pagehead"><div><h1>Utilizadores da plataforma</h1><p class="muted">Gerir contas, perfis e palavras-passe das instituições. A conta do Administrador do Sistema está protegida.</p></div><a class="btn secondary" href="/system/institutions">Voltar às instituições</a></div>
+<div class="panel"><table>
+<tr><th>Nome</th><th>Utilizador</th><th>Instituição</th><th>Perfil</th><th>Estado</th><th>Ações</th></tr>
+{% for u in rows %}<tr>
+<td>{{ u.name }}</td><td>{{ u.username }}</td><td>{{ institutions.get(u.institution_id, 'Administração da plataforma' if u.role == 'system_admin' else 'Sem instituição') }}</td>
+<td>{{ 'Administrador do Sistema' if u.role == 'system_admin' else ('Gestor institucional' if u.role in ['institution_admin','admin','gestor'] else ('Consulta/Auditoria' if u.role == 'auditor' else 'Técnico')) }}</td>
+<td>{{ 'Ativo' if u.active else 'Inativo' }}</td><td class="actions">
+{% if u.role != 'system_admin' %}
+<a class="btn small secondary" href="/system/users/{{ u.id }}/edit">✏️ Editar</a>
+<a class="btn small secondary" href="/system/users/{{ u.id }}/password">🔐 Alterar senha</a>
+<form method="post" action="/system/users/{{ u.id }}/toggle" style="display:inline"><button class="btn small secondary" type="submit">{{ 'Desativar' if u.active else 'Activar' }}</button></form>
+<form method="post" action="/system/users/{{ u.id }}/delete" style="display:inline" onsubmit="return confirm('Confirma a eliminação deste utilizador? Se existirem registos relacionados, a eliminação será recusada para preservar o histórico.')"><button class="btn small" type="submit">Eliminar</button></form>
+{% else %}<span class="muted">Conta protegida</span>{% endif %}
+</td></tr>{% else %}<tr><td colspan="6">Não existem utilizadores registados.</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

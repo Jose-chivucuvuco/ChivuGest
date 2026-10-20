@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="pagehead"><div><h1>Editar instituição</h1><p class="muted">Administração da plataforma · {{ inst.code }}</p></div><a class="btn secondary" href="/system/institutions">Voltar às instituições</a></div>
+<div class="panel"><form method="post" enctype="multipart/form-data" class="form">
+<label>Nome oficial da instituição<input name="institution_name" value="{{ profile.institution_name or inst.name }}" required></label>
+<label>Código (não editável)<input value="{{ inst.code }}" disabled></label>
+<label>NIF<input name="institution_nif" value="{{ profile.nif or inst.nif or '' }}"></label>
+<label>Ministério / órgão de tutela<input name="ministry" value="{{ profile.ministry or '' }}"></label>
+<label>Morada<input name="institution_address" value="{{ profile.address or '' }}"></label>
+<label>Telefone<input name="institution_phone" value="{{ profile.phone or '' }}"></label>
+<label>E-mail institucional<input name="institution_email" type="email" value="{{ profile.email or '' }}"></label>
+<label>Logótipo (PNG ou JPG)<input type="file" name="institution_logo" accept="image/png,image/jpeg"></label>
+{% if profile.logo_filename %}<p class="muted">Logótipo atual: <a href="{{ url_for('static', filename='uploads/' ~ profile.logo_filename) }}" target="_blank" rel="noopener">visualizar</a></p>{% endif %}
+<button>Guardar alterações</button></form></div>
+{% endblock %}

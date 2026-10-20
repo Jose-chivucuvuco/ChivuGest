@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="pagehead"><div><h1>Instituições</h1><p class="muted">Administração da plataforma. Os dados financeiros de cada instituição permanecem isolados.</p></div></div>
+<div class="panel"><h2>Criar instituição e Gestor inicial</h2><form method="post" class="form">
+<input name="name" placeholder="Nome oficial da instituição" required>
+<input name="code" placeholder="Código único (ex.: IONA)" required>
+<input name="nif" placeholder="NIF (opcional)">
+<input name="admin_name" placeholder="Nome completo do Gestor institucional" required>
+<input name="username" placeholder="Utilizador do Gestor" required>
+<input name="password" type="password" minlength="10" placeholder="Palavra-passe inicial (mín. 10 caracteres)" required>
+<button>Criar instituição</button></form></div>
+<div class="panel"><h2>Instituições registadas</h2><table><tr><th>Instituição</th><th>Código</th><th>NIF</th><th>Estado</th><th>Ações</th></tr>
+{% for i in rows %}<tr><td>{{i.name}}</td><td>{{i.code}}</td><td>{{i.nif or '—'}}</td><td>{{'Ativa' if i.active else 'Suspensa'}}</td><td class="actions"><a class="btn small secondary" href="/system/institutions/{{i.id}}/edit">Editar identificação</a> <form method="post" action="/system/institutions/{{i.id}}/toggle" style="display:inline"><button class="btn small secondary" type="submit">{{'Suspender' if i.active else 'Reactivar'}}</button></form> {% if i.code != 'DEFAULT' %}<form method="post" action="/system/institutions/{{i.id}}/delete" style="display:inline" onsubmit="return confirm('Confirma a eliminação desta instituição? A operação só será permitida se não existirem dados financeiros, contratos ou documentos associados.');"><button class="btn small" type="submit">Eliminar</button></form>{% else %}<span class="muted">Protegida</span>{% endif %}</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

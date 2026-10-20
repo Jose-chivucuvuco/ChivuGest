@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="pagehead">
+  <div><h1>Utilizadores</h1><p class="muted">Gestão de acessos ao ChivuGest.</p></div>
+  <a class="btn secondary" href="/change-password">🔐 Alterar minha palavra-passe</a>
+</div>
+<div class="panel">
+  <form method="post" class="form">
+    <input name="name" placeholder="Nome" required>
+    <input name="username" placeholder="Utilizador" required>
+    <input name="password" type="password" placeholder="Palavra-passe inicial" required>
+    <select name="role" required><option value="technician">Técnico — registar sem editar</option><option value="institution_admin">Gestor institucional — administrador</option><option value="auditor">Consulta/Auditoria — apenas leitura</option></select>
+    <button>Criar utilizador</button>
+  </form>
+  <p class="muted" style="font-size:12px;margin-top:10px"><b>Técnico:</b> pode consultar e registar novas informações; não pode editar, confirmar ou eliminar registos existentes. <b>Gestor:</b> tem permissões de administrador, incluindo gestão de utilizadores e configurações. As palavras-passe devem ter pelo menos 8 caracteres, incluindo maiúscula, minúscula e número.</p>
+</div>
+<div class="panel">
+  <table>
+    <tr><th>Nome</th><th>Utilizador</th><th>Perfil</th><th>Estado</th><th>Ação</th></tr>
+    {% for u in rows %}
+    <tr>
+      <td>{{u.name}}</td><td>{{u.username}}</td><td>{{ "Gestor institucional" if u.role in ["admin", "gestor", "institution_admin"] else ("Consulta/Auditoria" if u.role == "auditor" else "Técnico (registo sem edição)") }}</td>
+      <td>{{"Ativo" if u.active else "Inativo"}}</td>
+      <td class="actions">
+        <a class="btn small secondary" href="/users/edit/{{u.id}}">✏️ Editar utilizador</a>
+        <a class="btn small secondary" href="/users/reset-password/{{u.id}}">🔐 Alterar/redefinir senha</a>
+        {% if u.id != session.uid %}<form method="post" action="/users/toggle/{{u.id}}" style="display:inline"><button class="btn small secondary" type="submit">{{ "Desativar" if u.active else "Ativar" }}</button></form>
+        {% if u.role not in ["system_admin", "institution_admin"] or session.role == "system_admin" %}<form method="post" action="/users/delete/{{u.id}}" style="display:inline" onsubmit="return confirm('Confirma a eliminação deste utilizador? Esta operação não pode ser desfeita.')"><button class="btn small" type="submit">Eliminar</button></form>{% endif %}{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}

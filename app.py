@@ -471,19 +471,27 @@ def login_required(f):
 
         u = db.session.get(User, session["uid"])
         if not u or not u.active:
-            app.logger.warning(
-                "LOGIN_DIAG: utilizador inexistente ou inactivo"
-            )
+            app.logger.warning("LOGIN_DIAG: utilizador inexistente ou inactivo")
             session.clear()
             return redirect(url_for("login"))
 
         if u.role != "system_admin" and not session.get("institution_id"):
-            app.logger.warning(
-                "LOGIN_DIAG: falta institution_id na sessão"
-            )
+            app.logger.warning("LOGIN_DIAG: falta institution_id na sessão")
             session.clear()
             return redirect(url_for("login"))
 
+        return f(*a, **k)
+    return w
+
+
+def admin_required(f):
+    @wraps(f)
+    def w(*a, **k):
+        if session.get("role") not in ("institution_admin", "system_admin"):
+            flash("Acesso reservado ao Gestor da instituição.")
+            return redirect(url_for("dashboard"))
+        if session.get("role") == "system_admin" and not session.get("institution_id"):
+            return redirect(url_for("system_institutions"))
         return f(*a, **k)
     return w
 

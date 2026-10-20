@@ -1,0 +1,14 @@
+{% extends "base.html" %}{% block content %}
+<div class="pagehead"><div><h1>Editar registo</h1><p class="muted">Módulo: {{model.replace('_',' ').title()}}</p></div><a class="btn secondary" href="/admin/data">← Administração</a></div>
+<div class="panel"><form method="post" class="form three">
+{% for f in specs %}
+<label>{{f.label}}
+{% if f.kind=='select' %}<select name="{{f.name}}"><option value="">—</option>{% for id,label in f.options %}<option value="{{id}}" {% if f.value == id %}selected{% endif %}>{{label}}</option>{% endfor %}</select>
+{% elif f.kind=='bool' %}<input type="checkbox" name="{{f.name}}" {% if f.value %}checked{% endif %}>
+{% elif f.kind=='date' %}<input type="date" name="{{f.name}}" value="{{f.value.isoformat() if f.value else ''}}">
+{% elif f.kind=='number' or f.kind=='int' %}<input type="number" step="0.01" name="{{f.name}}" value="{{f.value if f.value is not none else ''}}">
+{% else %}<input name="{{f.name}}" value="{{f.value if f.value is not none else ''}}">
+{% endif %}</label>
+{% endfor %}
+<div class="actions" style="grid-column:1/-1"><button>Guardar alterações</button><a class="btn secondary" href="/admin/data">Cancelar</a></div>
+</form></div>{% endblock %}

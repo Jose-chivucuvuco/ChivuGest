@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="pagehead"><div><h1>Gestão de Contratos</h1><p class="muted">Contratos em vigor, contratos por regularizar e monitorização de prazo, valor, adendas e pagamentos.</p></div><a class="btn secondary" href="/alerts">Ver alertas</a></div>
+
+<div class="panel">
+<h2>Novo contrato</h2>
+<form method="post" class="form three" id="contractForm">
+  <input name="number" placeholder="N.º do contrato" required>
+  <select name="procedure_id" id="procedure_id">
+    <option value="">Procedimento associado (opcional)</option>
+    {% for p in procedures %}<option value="{{p.id}}" data-supplier="{{p.supplier_id or ''}}" data-object="{{p.object|e}}" data-category="{{p.contract_category}}" data-procedure="{{p.procedure_type}}" data-value="{{p.estimated_value or 0}}" data-cab="{{p.cabimentacao_ref or ''}}" data-cab-ok="{{'1' if p.cabimentado else '0'}}">{{p.code}} — {{p.object[:60]}}</option>{% endfor %}
+  </select>
+  <select name="supplier_id" id="supplier_id" required>
+    <option value="">Fornecedor</option>
+    {% for s in suppliers %}<option value="{{s.id}}">{{s.name}}</option>{% endfor %}
+  </select>
+  <select name="instrument_type" id="instrument_type"><option value="Contrato público">Instrumento: Contrato público</option>{% for i in instrument_types %}{% if i != "Contrato público" %}<option value="{{i}}">Instrumento: {{i}}</option>{% endif %}{% endfor %}</select>
+  <select name="framework_agreement_id" id="framework_agreement_id">
+    <option value="">Acordo-Quadro (opcional)</option>
+    {% for fa in framework_agreements %}
+      <option value="{{fa.id}}" data-suppliers="{% for s in fa.suppliers.all() %}{{s.id}}{% if not loop.last %},{% endif %}{% endfor %}">
+        {{fa.code}} — {{fa.object[:70]}}
+      </option>
+    {% endfor %}
+  </select>
+
+  <textarea name="object" id="contract_object" placeholder="Objecto" required></textarea>
+  <select name="contract_type" id="contract_type" required>{% for c in contract_categories %}<option>{{c}}</option>{% endfor %}</select>
+  <input name="procedure_type" id="procedure_type" placeholder="Tipo de procedimento" required readonly>
+
+  <label>Início<input name="start_date" type="date" required></label>
+  <label>Fim<input name="end_date" type="date" required></label>
+  <input name="original_value" id="original_value" type="number" step="0.01" min="0" placeholder="Valor inicial (Kz)" required>
+  <input name="current_value" id="current_value" type="number" step="0.01" min="0" placeholder="Valor actual (Kz)">
+  <input name="cabimentacao_ref" id="cabimentacao_ref" placeholder="N.º Nota de Cabimentação">
+  <input name="document_ref" placeholder="Referência do documento / arquivo">
+  <input name="advance_percent" type="number" step="0.01" min="0" placeholder="Adiantamento (%)">
+  <input name="amendments_percent" type="number" step="0.01" min="0" placeholder="Adendas acumuladas (%)">
+  <input name="renewal_count" type="number" min="0" value="0" placeholder="N.º de renovações">
+  <select name="status"><option>Em vigor</option><option>Por regularizar</option><option>Suspenso</option><option>Concluído</option><option>Expirado</option></select>
+  <select name="tribunal_review_status"><option>Não aplicável</option><option>Pendente</option><option>Em análise</option><option>Visto</option><option>Recusado</option></select>
+  <label class="check"><input type="checkbox" name="renewal_allowed"> Renovação prevista</label>
+  <label class="check"><input type="checkbox" name="cabimentado" id="cabimentado"> Cabimentação confirmada</label>
+  <label class="check"><input type="checkbox" name="tribunal_review_required"> Sujeito a fiscalização preventiva</label>
+  <label class="check"><input type="checkbox" name="guarantee_required"> Caução exigida</label>
+  <input name="guarantee_value" type="number" step="0.01" min="0" placeholder="Valor da caução (Kz)">
+  <textarea name="notes" placeholder="Observações / condições especiais"></textarea>
+  <button>Guardar e executar análise legal</button>
+</form>
+<p class="form-help">
+  O contrato pode ser independente ou decorrer de um Acordo-Quadro. Ao seleccionar um Acordo-Quadro,
+  o ChivuGest limita o fornecedor aos participantes desse acordo e identifica automaticamente o instrumento
+  como <b>Contrato ao abrigo de Acordo-Quadro</b>. O Acordo-Quadro pode existir sem qualquer contrato associado.
+  Ao seleccionar um procedimento, os dados principais do procedimento continuam a alimentar o contrato.
+</p>
+</div>
+
+<div class="panel">
+<div class="panelhead"><h2>Contratos registados</h2><span>Faturação, pagamentos e execução calculados automaticamente.</span></div>
+<table>
+<tr><th>Contrato</th><th>Fornecedor</th><th>Tipo</th><th>Instrumento</th><th>Acordo-Quadro</th><th>Valor actual</th><th>Faturado</th><th>Pago</th><th>Saldo</th><th>Execução</th><th>Fim</th><th>Estado</th>{% if session.role in ['institution_admin','admin','gestor'] %}<th>Ações</th>{% endif %}</tr>
+{% for row in rows %}{% set c=row.obj %}
+<tr>
+<td><b>{{c.number}}</b></td><td>{{c.supplier.name}}</td><td>{{c.contract_type}}</td><td>{{c.instrument_type or "—"}}</td><td>{{c.framework_agreement.code if c.framework_agreement else "—"}}</td>
+<td>Kz {{"{:,.2f}".format(c.current_value or 0)}}</td>
+<td>Kz {{"{:,.2f}".format(row.invoiced)}}</td><td>Kz {{"{:,.2f}".format(row.paid)}}</td>
+<td>Kz {{"{:,.2f}".format(row.balance)}}</td><td>{{"{:.2f}".format(row.execution)}}%</td>
+<td>{{c.end_date}}</td>
+<td>{% if c.status=='Em vigor' %}<span class="badge green">Em vigor</span>{% elif c.status=='Por regularizar' %}<span class="badge amber">Por regularizar</span>{% else %}<span class="badge">{{c.status}}</span>{% endif %}</td>
+{% if session.role in ['institution_admin','admin','gestor'] %}<td><a class="btn small secondary" href="/admin/edit/contract/{{c.id}}">Editar</a> <form method="post" action="/admin/delete/contract/{{c.id}}" style="display:inline" onsubmit="return confirm('Eliminar este contrato?')"><button class="btn small danger">Eliminar</button></form></td>{% endif %}
+</tr>
+{% else %}<tr><td colspan="13" class="empty">Nenhum contrato registado.</td></tr>{% endfor %}
+</table>
+</div>
+<script>
+(function(){
+  const procedure=document.getElementById('procedure_id');
+  const supplier=document.getElementById('supplier_id');
+  const framework=document.getElementById('framework_agreement_id');
+  const instrument=document.getElementById('instrument_type');
+  if(!supplier || !framework || !instrument) return;
+
+  const allSupplierOptions=[...supplier.options].map(o=>({
+    value:o.value, text:o.textContent, disabled:o.disabled
+  }));
+
+  function frameworkSupplierIds(){
+    const option=framework.options[framework.selectedIndex];
+    return option && option.dataset.suppliers
+      ? option.dataset.suppliers.split(',').filter(Boolean).map(Number)
+      : [];
+  }
+
+  function filterSuppliers(preferredId){
+    const ids=frameworkSupplierIds();
+    const current=preferredId || supplier.value;
+    supplier.innerHTML='';
+    const first=document.createElement('option');
+    first.value='';
+    first.textContent=ids.length ? 'Fornecedor participante' : 'Fornecedor';
+    supplier.appendChild(first);
+
+    allSupplierOptions.slice(1).forEach(item=>{
+      const opt=document.createElement('option');
+      opt.value=item.value;
+      opt.textContent=item.text;
+      if(ids.length && !ids.includes(Number(item.value))) opt.disabled=true;
+      supplier.appendChild(opt);
+    });
+
+    if(current && [...supplier.options].some(o=>o.value===String(current) && !o.disabled)){
+      supplier.value=String(current);
+    } else {
+      supplier.value='';
+    }
+  }
+
+  framework.addEventListener('change', function(){
+    filterSuppliers();
+    if(this.value) {
+      instrument.value='Contrato ao abrigo de Acordo-Quadro';
+    } else if(instrument.value==='Contrato ao abrigo de Acordo-Quadro') {
+      instrument.value='Contrato público';
+    }
+  });
+
+  supplier.addEventListener('change', function(){
+    // Keep the selected supplier inside the Acordo-Quadro participant list.
+    const ids=frameworkSupplierIds();
+    if(framework.value && this.value && !ids.includes(Number(this.value))) {
+      this.value='';
+    }
+  });
+
+  if(procedure){
+    procedure.addEventListener('change', function(){
+      const o=this.options[this.selectedIndex];
+      if(!o.value) return;
+      const set=(id,v)=>{const e=document.getElementById(id); if(e && v!==undefined && v!=='') e.value=v;};
+      set('contract_object',o.dataset.object);
+      set('contract_type',o.dataset.category);
+      set('procedure_type',o.dataset.procedure);
+      set('original_value',o.dataset.value);
+      set('current_value',o.dataset.value);
+      set('cabimentacao_ref',o.dataset.cab);
+      const cb=document.getElementById('cabimentado');
+      if(cb) cb.checked=(o.dataset.cabOk==='1');
+
+      if(o.dataset.supplier){
+        // If the procedure supplies a vendor, keep that vendor.
+        const ids=frameworkSupplierIds();
+        if(!framework.value || ids.includes(Number(o.dataset.supplier))){
+          supplier.value=o.dataset.supplier;
+        }
+      }
+    });
+  }
+
+  filterSuppliers();
+})();
+</script>
+{% endblock %}
