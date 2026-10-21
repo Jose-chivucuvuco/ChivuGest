@@ -3879,6 +3879,49 @@ def admin_delete_supplier_payments_bulk():
         flash("Erro ao eliminar pagamentos seleccionados: " + str(e))
     return redirect(url_for("supplier_payments"))
 
+@app.route("/admin/delete-records-bulk/<kind>", methods=["POST"])
+@login_required
+@admin_required
+def admin_delete_records_bulk(kind):
+    config = {
+        "supplier-invoices": (SupplierInvoice, "invoice_ids", "supplier_invoices", "faturas"),
+        "procurement": (ProcurementProcedure, "record_ids", "procurement", "procedimentos"),
+        "framework-agreements": (FrameworkAgreement, "record_ids", "framework_agreements", "Acordos-Quadro"),
+        "contracts": (Contract, "record_ids", "contracts", "contratos"),
+        "invoices": (Invoice, "record_ids", "invoices", "faturas"),
+        "payments": (Payment, "record_ids", "payments", "pagamentos"),
+    }
+    if kind not in config:
+        abort(404)
+    model, field, endpoint, label = config[kind]
+    ids = sorted({int(x) for x in request.form.getlist(field) if str(x).isdigit()})
+    if not ids:
+        flash("Seleccione pelo menos um registo.")
+        return redirect(url_for(endpoint))
+    deleted = skipped = 0
+    try:
+        for rid in ids:
+            obj = db.session.get(model, rid)
+            if obj is None:
+                continue
+            try:
+                with db.session.begin_nested():
+                    db.session.delete(obj)
+                    db.session.flush()
+                deleted += 1
+            except IntegrityError:
+                skipped += 1
+        db.session.commit()
+        audit("BULK_DELETE", model.__name__, None, f"Eliminação em lote de {label}: eliminados={deleted}; seleccionados={len(ids)}; ignorados por dependências={skipped}")
+        msg = f"{deleted} registo(s) eliminado(s)."
+        if skipped:
+            msg += f" {skipped} não eliminado(s) por terem registos dependentes."
+        flash(msg)
+    except Exception as e:
+        db.session.rollback()
+        flash("Erro ao eliminar seleccionados: " + str(e))
+    return redirect(url_for(endpoint))
+
 @app.route("/admin/delete/<model>/<int:record_id>", methods=["POST"])
 @login_required
 @admin_required

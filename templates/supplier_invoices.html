@@ -33,10 +33,11 @@
 </div>
 
 <div class="panel">
-  <table>
-    <tr><th>Fatura</th><th>Fornecedor</th><th>Acordo-Quadro</th><th>Contrato</th><th>Emissão</th><th>Total</th><th>Pago</th><th>Saldo</th><th>Estado</th>{% if session.role in ['institution_admin','admin','gestor'] %}<th>Ações</th>{% endif %}</tr>
+  {% if session.role in ['institution_admin','admin','gestor'] %}<form id="bulkDelete-supplier-invoices" method="post" action="/admin/delete-records-bulk/supplier-invoices" onsubmit="return confirm('Eliminar os registos seleccionados? Esta acção não pode ser anulada.')" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0"><button class="btn small danger" type="submit">Eliminar seleccionados</button><label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="selectAll-supplier-invoices"> Seleccionar todos</label><span id="count-supplier-invoices" class="muted">0 seleccionados</span></form>
+{% endif %}<table>
+    <tr>{% if session.role in ['institution_admin','admin','gestor'] %}<th>Seleccionar</th>{% endif %}<th>Fatura</th><th>Fornecedor</th><th>Acordo-Quadro</th><th>Contrato</th><th>Emissão</th><th>Total</th><th>Pago</th><th>Saldo</th><th>Estado</th>{% if session.role in ['institution_admin','admin','gestor'] %}<th>Ações</th>{% endif %}</tr>
     {% for i in rows %}
-    <tr>
+    <tr>{% if session.role in ['institution_admin','admin','gestor'] %}<td><input type="checkbox" form="bulkDelete-supplier-invoices" class="bulk-select-supplier-invoices" name="invoice_ids" value="{{i.id}}"></td>{% endif %}
       <td><b>{{i.number}}</b>{% if i.source_filename %}<br><small>Importada: {{i.source_filename}}</small>{% endif %}</td>
       <td>{{i.supplier.name}}</td>
       <td>{{i.framework_agreement.code if i.framework_agreement else (i.contract.framework_agreement.code if i.contract and i.contract.framework_agreement else '—')}}</td>
@@ -69,4 +70,5 @@
   supplier.addEventListener('change',filter); fa.addEventListener('change',filter); contract.addEventListener('change',filter); filter();
 })();
 </script>
+<script>(function(){const all=document.getElementById('selectAll-supplier-invoices'), boxes=[...document.querySelectorAll('.bulk-select-supplier-invoices')], count=document.getElementById('count-supplier-invoices'), form=document.getElementById('bulkDelete-supplier-invoices');if(!all||!form)return;function refresh(){const n=boxes.filter(x=>x.checked).length;count.textContent=n+' seleccionado(s)';all.checked=boxes.length>0&&n===boxes.length;all.indeterminate=n>0&&n<boxes.length;}all.addEventListener('change',()=>{boxes.forEach(x=>x.checked=all.checked);refresh();});boxes.forEach(x=>x.addEventListener('change',refresh));form.addEventListener('submit',e=>{if(!boxes.some(x=>x.checked)){e.preventDefault();alert('Seleccione pelo menos um registo.');}});refresh();})();</script>
 {% endblock %}
