@@ -621,7 +621,7 @@ def tenant_and_role_guard():
             flash("A instituição está suspensa ou indisponível. Contacte o Administrador do Sistema.")
             return redirect(url_for("login"))
     if session.get("role") == "system_admin":
-        allowed = (path.startswith("/system") or path in ("/logout", "/change-password", "/health", "/admin/backup", "/admin/backup/restore", "/legal", "/legal/check") or path.startswith("/static/"))
+        allowed = (path.startswith("/system") or path in ("/logout", "/change-password", "/health", "/admin/backup", "/admin/backup/restore", "/legal", "/legal/check") or path.startswith("/static/") or path.startswith("/institution-logo/"))
         if not allowed:
             return redirect(url_for("system_institutions"))
 
@@ -665,6 +665,31 @@ def technician_read_only_guard():
     if method in ("PUT", "PATCH", "DELETE"):
         flash("Operação não permitida ao perfil Técnico.")
         return redirect(url_for("dashboard"))
+
+
+@app.route("/institution-logo/<int:institution_id>")
+@login_required
+def institution_logo(institution_id):
+    """Serve only the logo belonging to the authenticated institution."""
+    current_id = session.get("institution_id")
+    if session.get("role") != "system_admin" and str(current_id) != str(institution_id):
+        abort(404)
+    profile = InstitutionProfile.query.execution_options(skip_tenant_scope=True).filter_by(
+        institution_id=institution_id
+    ).first()
+    if not profile or not profile.logo_filename:
+        abort(404)
+    filename = os.path.basename(profile.logo_filename)
+    # Never allow a profile value to escape the uploads directory.
+    upload_dir = os.path.realpath(os.path.join(app.root_path, "static", "uploads"))
+    logo_path = os.path.realpath(os.path.join(upload_dir, filename))
+    if os.path.commonpath([upload_dir, logo_path]) != upload_dir or not os.path.isfile(logo_path):
+        abort(404)
+    response = send_file(logo_path, conditional=True, max_age=0)
+    response.headers["Cache-Control"] = "private, no-cache, no-store, must-revalidate"
+    response.headers["Vary"] = "Cookie"
+    return response
+
 
 
 @app.context_processor

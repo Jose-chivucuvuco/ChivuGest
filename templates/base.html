@@ -9,7 +9,7 @@
   <aside class="sidebar">
     <a class="brand" href="/" aria-label="ChivuGest - início">
       {% if institution_profile and institution_profile.logo_filename %}
-        <img class="brand-logo" src="{{ url_for('static', filename='uploads/' ~ institution_profile.logo_filename) }}" alt="Logótipo institucional">
+        <img class="brand-logo" src="{{ url_for('institution_logo', institution_id=institution_profile.institution_id, v=institution_profile.updated_at.timestamp() if institution_profile.updated_at else 0) }}" alt="Logótipo institucional">
       {% else %}<span class="brand-mark">CG</span>{% endif %}
       <span class="brand-copy"><strong>{{ session.institution_name or 'ChivuGest' }}</strong><small>Gestão financeira e contratação</small></span>
     </a>
